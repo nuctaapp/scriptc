@@ -714,6 +714,13 @@ double scr_os_totalmem(void) {
   return (double)ms.ullTotalPhys;
 }
 
+double scr_os_available_parallelism(void) {
+  /* GetSystemInfo's processor count — libuv's win32 answer. */
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  return si.dwNumberOfProcessors > 0 ? (double)si.dwNumberOfProcessors : 1;
+}
+
 ScrStr *scr_os_tmpdir(void) {
   /* GetTempPathA is libuv's source (TMP → TEMP → USERPROFILE → windir),
    * with Node's one-trailing-separator trim. */
@@ -743,6 +750,8 @@ ScrStr *scr_os_user_homedir(void) { return scr_os_homedir(); }
 ScrStr *scr_os_release(void) { return scr_str_new("", 0); }
 ScrStr *scr_os_type(void) { return scr_str_new("WASI", 4); }
 double scr_os_totalmem(void) { return 0; }
+/* WASI has no scheduler surface: a single-threaded guest answers 1. */
+double scr_os_available_parallelism(void) { return 1; }
 /* The guest temp namespace is stable across hosts. `scriptc run` preopens
  * the host's /tmp at this path; other WASI hosts can provide the same
  * capability without leaking a host-specific TMPDIR into the module. */
@@ -823,6 +832,12 @@ double scr_os_totalmem(void) {
   long psize = sysconf(_SC_PAGE_SIZE);
   if (pages <= 0 || psize <= 0) return 0;
   return (double)pages * (double)psize;
+}
+
+double scr_os_available_parallelism(void) {
+  /* Online CPU count (sysconf) — libuv's answer on Darwin/Linux. */
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  return n > 0 ? (double)n : 1;
 }
 
 ScrStr *scr_os_tmpdir(void) {

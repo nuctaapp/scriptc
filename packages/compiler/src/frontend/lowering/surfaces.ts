@@ -712,6 +712,9 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     type: { fn: "os.type", params: [], result: STRING },
     // Total physical memory in bytes — same predating-pair story.
     totalmem: { fn: "os.totalmem", params: [], result: F64 },
+    // Scheduler-visible CPU count, >= 1 (GetSystemInfo on win32,
+    // sysconf(_SC_NPROCESSORS_ONLN) elsewhere) — Node's uv answer.
+    availableParallelism: { fn: "os.availableParallelism", params: [], result: F64 },
     // Entirely special-cased (lowerOsNetworkInterfacesCall): the result is
     // the call site's mapped Dict<NetworkInterfaceInfo[]> shape, verified
     // structurally there — this entry only routes the dispatch.
@@ -1369,7 +1372,7 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
       ]),
     ),
     ...Object.fromEntries(
-      ["pbkdf2", "pbkdf2Sync", "scrypt", "scryptSync", "hkdf", "hkdfSync"].map((m) => [
+      ["pbkdf2", "pbkdf2Sync", "scrypt", "hkdf", "hkdfSync"].map((m) => [
         m,
         "key-derivation functions have no lowering yet — the lowered crypto surface is " +
           "hashing, randomness, and the introspection statics",

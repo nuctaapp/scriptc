@@ -2824,6 +2824,7 @@ ScrStr *scr_os_tmpdir(void);
 ScrStr *scr_os_release(void); /* uname(2) release — +1 fresh */
 ScrStr *scr_os_type(void);    /* uname(2) sysname — +1 fresh */
 double scr_os_totalmem(void); /* total physical memory, bytes */
+double scr_os_available_parallelism(void); /* scheduler-visible CPU count, >= 1 */
 /* os.userInfo()'s field trio (pw_name / pw_shell / pw_dir — the passwd
  * home, not the $HOME cascade). +1 fresh; abort on lookup failure. */
 ScrStr *scr_os_user_name(void);

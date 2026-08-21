@@ -3222,6 +3222,9 @@ export type IrLibFn =
   | "os.type"
   /** os.totalmem(): total physical memory in bytes. Never throws. */
   | "os.totalmem"
+  /** os.availableParallelism(): scheduler-visible CPU count, >= 1.
+   * Never throws. */
+  | "os.availableParallelism"
   /** net's process-wide happy-eyeballs attempt budget (Node's default
    * 250ms): one runtime double in the core unit, so reading/writing it
    * never forces the net unit into the link. Never throw. */

@@ -523,6 +523,18 @@
       "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
+      "id": "node-builtin.crypto.aesGcmOpenSync",
+      "kind": "node-builtin",
+      "name": "crypto.aesGcmOpenSync",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.crypto.aesGcmSealSync",
+      "kind": "node-builtin",
+      "name": "crypto.aesGcmSealSync",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.crypto.createCipheriv",
       "kind": "node-builtin",
       "name": "crypto.createCipheriv",
@@ -770,9 +782,7 @@
       "id": "node-builtin.crypto.scryptSync",
       "kind": "node-builtin",
       "name": "crypto.scryptSync",
-      "status": "unsupported",
-      "code": "SC2020",
-      "note": "key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics"
+      "status": "static"
     },
     {
       "id": "node-builtin.crypto.setFips",
@@ -789,6 +799,12 @@
       "status": "unsupported",
       "code": "SC2020",
       "note": "asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics"
+    },
+    {
+      "id": "node-builtin.crypto.timingSafeEqual",
+      "kind": "node-builtin",
+      "name": "crypto.timingSafeEqual",
+      "status": "static"
     },
     {
       "id": "node-builtin.crypto.verify",
@@ -1182,6 +1198,12 @@
       "name": "os.EOL",
       "status": "static",
       "note": "constant value read"
+    },
+    {
+      "id": "node-builtin.os.availableParallelism",
+      "kind": "node-builtin",
+      "name": "os.availableParallelism",
+      "status": "static"
     },
     {
       "id": "node-builtin.os.homedir",
@@ -2630,8 +2652,8 @@
       "id": "stdlib.math.exp",
       "kind": "stdlib",
       "name": "Math.exp",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
     },
     {
       "id": "stdlib.math.floor",
@@ -2651,8 +2673,8 @@
       "id": "stdlib.math.log",
       "kind": "stdlib",
       "name": "Math.log",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
     },
     {
       "id": "stdlib.math.log10",
@@ -2665,8 +2687,8 @@
       "id": "stdlib.math.log2",
       "kind": "stdlib",
       "name": "Math.log2",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
     },
     {
       "id": "stdlib.math.max",
@@ -2686,8 +2708,8 @@
       "id": "stdlib.math.pow",
       "kind": "stdlib",
       "name": "Math.pow",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "compiles statically at arity 2; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
     },
     {
       "id": "stdlib.math.random",
@@ -2721,8 +2743,8 @@
       "id": "stdlib.math.sqrt",
       "kind": "stdlib",
       "name": "Math.sqrt",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
     },
     {
       "id": "stdlib.math.tan",
