@@ -7434,7 +7434,9 @@ export function lowerPrefixUnary(L: Lowerer, expr: ts.PrefixUnaryExpression): Ir
         if (operand.type.kind === "jsval") {
           return { kind: "jsOp", op: "neg", args: [operand], type: JSVAL, loc };
         }
-        if (operand.type.kind !== "f64") L.unsupported("SC1043", expr);
+        if (operand.type.kind !== "f64") {
+          L.unsupported("SC1043", expr, "unary '-' on a non-number operand — narrow the operand to a plain number first");
+        }
         if (operand.kind === "numLit") return { ...operand, value: -operand.value, loc };
         return { kind: "unary", op: "-", operand, type: F64, loc };
       }
@@ -7449,7 +7451,9 @@ export function lowerPrefixUnary(L: Lowerer, expr: ts.PrefixUnaryExpression): Ir
         if (operand.type.kind === "string") {
           return { kind: "libCall", fn: "num.fromString", args: [operand], type: F64, loc };
         }
-        if (operand.type.kind !== "f64") L.unsupported("SC1043", expr);
+        if (operand.type.kind !== "f64") {
+          L.unsupported("SC1043", expr, "unary '+' on a non-number, non-string operand — narrow the operand first");
+        }
         return operand;
       }
       case ts.SyntaxKind.ExclamationToken: {
@@ -7460,7 +7464,9 @@ export function lowerPrefixUnary(L: Lowerer, expr: ts.PrefixUnaryExpression): Ir
       case ts.SyntaxKind.TildeToken: {
         // `~x`: ToInt32, complement, back to f64 (JS-exact, incl. NaN → -1).
         const operand = L.lowerExpr(expr.operand);
-        if (operand.type.kind !== "f64") L.unsupported("SC1043", expr);
+        if (operand.type.kind !== "f64") {
+          L.unsupported("SC1043", expr, "'~' on a non-number operand — narrow the operand to a plain number first");
+        }
         return { kind: "unary", op: "~", operand, type: F64, loc };
       }
       case ts.SyntaxKind.PlusPlusToken:
@@ -7533,7 +7539,12 @@ export function lowerPrefixUnary(L: Lowerer, expr: ts.PrefixUnaryExpression): Ir
     if (!target) {
       L.rejectUnresolved(expr.operand, `increment/decrement of '${expr.operand.text}' (not a writable local or module global)`);
     }
-    if (target.type.kind !== "f64") L.unsupported("SC1043", expr);
+    if (target.type.kind !== "f64") {
+      // The registered SC1043 text talks about comparisons; without this
+      // detail an increment over `number | undefined` reads as a comparison
+      // error on the surrounding line and sends the fix the wrong way.
+      L.unsupported("SC1043", expr, "'++'/'--' (and compound assignment) on a target that is not a plain number — a 'number | undefined' target needs narrowing to number first");
+    }
     return { kind: "incDec", op, prefix, localId: target.id, type: F64, loc };
   }
 
