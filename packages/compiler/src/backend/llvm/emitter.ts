@@ -80,7 +80,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, ffiCallbackType, islandCallbackRet, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, unionArmsEmbedIdentically, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { allocateFfiCallbackAdapters, collectFfiRetainedOps, hasForeignFfiCallback, hasRetainedFfiCallback, parseFfiCallbackKey, type FfiCallbackAdapter } from "../ffi-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
@@ -3043,6 +3043,15 @@ class LlEmitter {
     const t = this.B.tmp();
     this.B.line(`${t} = call ptr ${retainSym(this, type)}(ptr ${name})`);
     return t;
+  }
+
+  /** The keyed-read surface fast path's gate (unionArmsEmbedIdentically):
+   * a union value passes into the wider result union unchanged. */
+  private unionEmbedsAsIs(src: IrType, dst: IrType): boolean {
+    if (src.kind !== "union" || dst.kind !== "union") return false;
+    const s = this.unionsById.get(src.unionId);
+    const d = this.unionsById.get(dst.unionId);
+    return !!s && !!d && unionArmsEmbedIdentically(s.arms, d.arms);
   }
 
   /** The release call for one owned refcounted value — type-directed like
@@ -11454,8 +11463,12 @@ class LlEmitter {
     // How a hit of type `vt` surfaces as the result union (the C helper's
     // `surface`): the same union passes through; anything else wraps into
     // its arm (+1 for borrowed ref reads, ownership moves for owned ones).
+    // A DIFFERENT union whose arms keep their tag indices in the result
+    // (unionArmsEmbedIdentically — the frontend gate and the C emitter
+    // take the same path) also passes through: the runtime box carries
+    // only the numeric tag + the arm's RC adapters.
     const surface = (vt: IrType, expr: string, owned: boolean): string => {
-      if (typeEquals(vt, resultType)) {
+      if (typeEquals(vt, resultType) || this.unionEmbedsAsIs(vt, resultType)) {
         return owned ? expr : this.retainValue(expr, vt);
       }
       const tag = def.arms.findIndex((a) => typeEquals(a, vt));

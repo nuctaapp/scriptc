@@ -369,6 +369,25 @@ export function isUnitType(t: IrType): boolean {
   return t.kind === "undefinedT" || t.kind === "nullT";
 }
 
+/** Does a union VALUE of the source union pass unchanged into the WIDER
+ * destination union? True when every source arm keeps its exact tag index
+ * in the destination — the runtime union box carries only the numeric tag
+ * plus the arm's RC adapters (no union identity), so the value needs no
+ * re-tag or re-box. Unit arms decline: their interned per-union instances
+ * carry pointer identity. The keyed-read surface fast path (an
+ * undefined-armed read result over a union-valued index signature) relies
+ * on this in the frontend gate and BOTH backends — the three must agree. */
+export function unionArmsEmbedIdentically(
+  srcArms: readonly IrType[],
+  dstArms: readonly IrType[],
+): boolean {
+  return (
+    srcArms.length > 0 &&
+    srcArms.length <= dstArms.length &&
+    srcArms.every((a, i) => typeEquals(a, dstArms[i]!) && !isUnitType(a))
+  );
+}
+
 /** Element kinds with a real ScrArr storage/RC representation in BOTH
  * backends. Array-producing lowerings can learn their result element from
  * a callback rather than through mapType's ordinary T[] gate, so they must

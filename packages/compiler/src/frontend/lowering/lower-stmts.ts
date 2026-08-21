@@ -3246,7 +3246,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // later references to this name don't produce cascading errors.
     let init: IrExpr;
     try {
-      init = immediatelyGuardedAbsenceProbe(L, decl)
+      init = immediatelyGuardedAbsenceProbe(L, decl) || annotatedUndefinedArmed(L, decl)
         ? (lowerAbsenceProbe(L, decl.initializer) ?? L.lowerExpr(decl.initializer))
         : L.lowerExpr(decl.initializer);
     } catch (e) {
@@ -3482,6 +3482,17 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       L.runtimeOptionalStorageLocals.add(runtimeOptionalRoot);
     }
     return { kind: "varDecl", localId: local.id, init, loc: locOf(decl) };
+  }
+
+  /** A declaration whose ANNOTATED type has an undefined arm (`const v:
+   * T | undefined = m[k]`): the declared-type spelling of an absence
+   * probe — the binding can hold the missing-key undefined, so the keyed
+   * read must produce it instead of the typed trap (the same stance
+   * lowerExprExpecting takes for assignments into undefined-armed slots). */
+  function annotatedUndefinedArmed(L: Lowerer, decl: ts.VariableDeclaration): boolean {
+    if (!decl.type || !ts.isIdentifier(decl.name) || !decl.initializer) return false;
+    const t = L.mapTypeOf(L.typeOf(decl.name));
+    return t?.kind === "union" && L.armTag(t.unionId, UNDEFINED_T) >= 0;
   }
 
   function immediatelyGuardedAbsenceProbe(L: Lowerer, decl: ts.VariableDeclaration): boolean {

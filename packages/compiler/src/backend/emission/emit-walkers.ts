@@ -6,7 +6,7 @@
  * interning ORDER is part of the emitted C, so the registries stay on
  * CEmitter and these functions only consult them through it. */
 import type { CEmitter } from "./emitter.js";
-import { DYN_HANDLE_KINDS, IrType, isRefCounted, typeEquals, typeKey } from "../../ir/nodes.js";
+import { DYN_HANDLE_KINDS, IrType, isRefCounted, typeEquals, typeKey, unionArmsEmbedIdentically } from "../../ir/nodes.js";
 import { cDecl, cStringLiteral, cType, elemAccess, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleField, mangleRecordNew, mangleRecordStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -1964,8 +1964,18 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     E.walkerProtos.push(`${sig}; /* r[k] on ${shapeId} as ${typeKey(t)} */`);
     const d: string[] = [`${sig} { /* r[k] on ${shapeId} as ${typeKey(t)} */`];
     // How a value of type `vt` (a field, or the overflow hit) surfaces as T.
+    // A DIFFERENT union whose arms keep their tag indices in T passes
+    // through unchanged (unionArmsEmbedIdentically — the frontend gate and
+    // the LLVM emitter take the same path): the runtime box carries only
+    // the numeric tag + the arm's RC adapters.
+    const embedsAsIs = (vt: IrType): boolean => {
+      if (vt.kind !== "union" || t.kind !== "union") return false;
+      const src = E.unionsById.get(vt.unionId);
+      const dst = E.unionsById.get(t.unionId);
+      return !!src && !!dst && unionArmsEmbedIdentically(src.arms, dst.arms);
+    };
     const surface = (vt: IrType, expr: string, owned: boolean): string => {
-      if (typeEquals(vt, t)) {
+      if (typeEquals(vt, t) || embedsAsIs(vt)) {
         return owned || !isRefCounted(vt) ? expr : retainCallC(vt, expr);
       }
       if (t.kind === "dyn") {

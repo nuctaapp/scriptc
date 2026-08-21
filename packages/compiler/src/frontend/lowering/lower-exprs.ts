@@ -8,7 +8,7 @@ import * as ts from "../ts7/adapter.js";
 import { dirname, posix } from "node:path";
 import type { Lowerer } from "./lowerer.js";
 import { wasiGuestPath } from "../../wasi-paths.js";
-import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
+import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionArmsEmbedIdentically, unionFuncSetArmsOk } from "../../ir/nodes.js";
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModulesArrayLit, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
@@ -6622,9 +6622,21 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
    * each field to be the type itself or one of its arms, and the overflow
    * value to be the type or wrappable into it. */
   function recordKeyResultOk(L: Lowerer, shape: IrRecordShape, type: IrType): boolean {
+    // A union-valued field/overflow surfaces AS-IS into a wider result
+    // union when every arm keeps its tag index (the undefined-armed read
+    // over a union index signature — `{ [k: string]: string | Tree }` read
+    // as `string | Tree | undefined`); both backends take the same fast
+    // path (unionArmsEmbedIdentically — the three must agree).
+    const embedsAsIs = (t: IrType): boolean => {
+      if (t.kind !== "union" || type.kind !== "union") return false;
+      const src = L.unions.get(t.unionId);
+      const dst = L.unions.get(type.unionId);
+      return !!src && !!dst && unionArmsEmbedIdentically(src.arms, dst.arms);
+    };
     const surfaces = (t: IrType): boolean =>
       typeEquals(t, type) ||
       (type.kind === "union" && L.armTag(type.unionId, t) >= 0) ||
+      embedsAsIs(t) ||
       (type.kind === "dyn" && L.dynConvertible(t));
     if (!shape.fields.every((f) => surfaces(f.type))) return false;
     if (shape.indexValue) {
