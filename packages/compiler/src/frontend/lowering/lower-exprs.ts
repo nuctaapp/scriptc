@@ -7318,6 +7318,20 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
           }
         }
       }
+      // A TUPLE cast to an array type (`TIME_GRAINS as readonly string[]` —
+      // the const-table pattern spelled as a cast instead of an annotated
+      // slot): NOT erasable — a record-typed value riding array-typed
+      // contexts hands the validator ill-typed array intrinsics. The same
+      // rebuild the annotated slot gets (widthCoerce's tupleArr lift, the
+      // usual copy stance); an unliftable tuple keeps the erasure and the
+      // downstream fences answer.
+      if (inner.type.kind === "record") {
+        const target = L.mapTypeOf(targetTs0);
+        if (target?.kind === "array") {
+          const coerced = L.widthCoerce(inner, target);
+          if (coerced) return coerced;
+        }
+      }
       return inner; // erasure, unchanged
     }
     if (inner.type.kind === "jsval") {
