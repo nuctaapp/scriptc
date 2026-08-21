@@ -2239,6 +2239,28 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       if (narrowed?.kind === "object" && narrowed.className === "%Error") {
         return { kind: "dynCheck", value: expr, type: narrowed, loc: expr.loc };
       }
+      // A narrow to an Error SUBCLASS (program or builtin): the same
+      // validated %Error extraction — which answers the ORIGINAL instance
+      // for an error that crossed the boundary (scr_dyn_from_error's
+      // identity cache), so subclass fields are really there — then the
+      // checker-trusted downcast the object bridge below uses (tsc only
+      // narrows to the subclass after a dynamic test the runtime answered
+      // with the true vtable interval). An alien %error marker never
+      // reaches the downcast: its rebuilt runtime error carries a BUILTIN
+      // vtable, so the guarding instanceof answers false for program
+      // classes and exactly its builtin kind otherwise.
+      if (
+        narrowed?.kind === "object" &&
+        L.isSubclassOf(narrowed.className, "%Error")
+      ) {
+        const asError: IrExpr = {
+          kind: "dynCheck",
+          value: expr,
+          type: { kind: "object", className: "%Error" },
+          loc: expr.loc,
+        };
+        return { kind: "downcast", value: asError, type: narrowed, loc: expr.loc };
+      }
       return expr;
     }
     // instanceof narrowing for classes: tsc types this USE as a subclass of
@@ -10678,6 +10700,18 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       };
     }
     if (target.container === "class") {
+      // A class-typed CHECKER target whose receiver VALUE is still dyn:
+      // no supported narrowing extracted it (only the Error hierarchy
+      // narrows out of 'unknown' — maybeNarrow's bridges). Fence honestly
+      // here instead of handing the validator an ill-typed fieldGet.
+      if (target.obj.type.kind === "dyn") {
+        L.unsupported(
+          "SC1090",
+          blame,
+          `reading class field '${target.field}' through an 'unknown' value ` +
+            `(only Error-hierarchy narrowings extract class instances from 'unknown')`,
+        );
+      }
       const read: IrExpr = { kind: "fieldGet", obj: target.obj, className: target.className, field: target.field, type: target.fieldType, loc };
       // DEFERRED-INIT fields (`stream!: T` assigned past the constructor's
       // top level — ClassInfo.deferredInitFields): the SLOT is the
@@ -10773,6 +10807,17 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         overflowOnly: true,
         loc,
       };
+    }
+    if (target.container === "class" && target.obj.type.kind === "dyn") {
+      // Same fence as the read path: a class-typed target whose receiver
+      // VALUE stayed dyn has no supported extraction — reject honestly
+      // instead of handing the validator an ill-typed fieldSet.
+      L.unsupported(
+        "SC1090",
+        blame,
+        `assigning class field '${target.field}' through an 'unknown' value ` +
+          `(only Error-hierarchy narrowings extract class instances from 'unknown')`,
+      );
     }
     return target.container === "class"
       ? { kind: "fieldSet", obj: target.obj, className: target.className, field: target.field, value, loc }
