@@ -50,6 +50,16 @@ typedef struct {
 struct ScrPoller {
   ScrpEntry *entries;
   size_t n, cap;
+  /* Reused WSAPoll scratch, sized to the WHOLE table: a fixed-size batch
+   * starves whatever the swap-remove shuffle pushes past it — measured as
+   * multi-second accept freezes once ~85 fds put the listener beyond a
+   * 64-entry window. */
+  WSAPOLLFD *pfds;
+  ScrpEntry **owners;
+  size_t pfds_cap;
+  /* Rotating report start: a full out[] batch resumes where it stopped,
+   * so table order can't starve the tail entries either. */
+  size_t rr;
 };
 
 static ScrpEntry *scrp_find_fd(ScrPoller *p, int fd) {
@@ -118,8 +128,25 @@ void scrp_poller_free(ScrPoller *p) {
     }
   }
   free(p->entries);
+  free(p->pfds);
+  free(p->owners);
   free(p);
   WSACleanup();
+}
+
+/* Grow the WSAPoll scratch to the table size (amortized doubling). */
+static bool scrp_pfds_reserve(ScrPoller *p, size_t need) {
+  if (p->pfds_cap >= need) return true;
+  size_t cap = p->pfds_cap == 0 ? 64 : p->pfds_cap;
+  while (cap < need) cap *= 2;
+  WSAPOLLFD *pf = realloc(p->pfds, cap * sizeof *pf);
+  if (pf == NULL) return false;
+  p->pfds = pf;
+  ScrpEntry **ow = realloc(p->owners, cap * sizeof *ow);
+  if (ow == NULL) return false; /* pfds grew alone: cap not raised, retry later */
+  p->owners = ow;
+  p->pfds_cap = cap;
+  return true;
 }
 
 /* The loop's blocking wait: the union of every live poller's socket
@@ -129,8 +156,21 @@ void scrp_poller_free(ScrPoller *p) {
  * when there is nothing to wait on; readiness itself is NOT consumed here,
  * the zero-timeout drain at dispatch reports it exactly as before. */
 static bool scrp_wait_any(double timeout_ms) {
-  enum { SCRP_WAIT_BATCH = 256 };
-  WSAPOLLFD pfds[SCRP_WAIT_BATCH];
+  /* The union of every live poller's sockets, WHOLE tables (a fixed batch
+   * would silently un-wait whatever lands past it — the drain's starvation
+   * class); the scratch grows to the combined size and is reused. */
+  static WSAPOLLFD *pfds = NULL;
+  static size_t pfds_cap = 0;
+  size_t total = 0;
+  for (size_t pi = 0; pi < scrp_nlive; pi++) total += scrp_live[pi]->n;
+  if (pfds_cap < total) {
+    size_t cap = pfds_cap == 0 ? 64 : pfds_cap;
+    while (cap < total) cap *= 2;
+    WSAPOLLFD *grown = realloc(pfds, cap * sizeof *grown);
+    if (grown == NULL) return false; /* OOM: the capped sleep serves this turn */
+    pfds = grown;
+    pfds_cap = cap;
+  }
   ULONG npfds = 0;
   double now = scr_now_ms();
   double limit = timeout_ms;
@@ -143,7 +183,6 @@ static bool scrp_wait_any(double timeout_ms) {
         if (left < limit) limit = left;
         continue;
       }
-      if (npfds >= SCRP_WAIT_BATCH) continue;
       pfds[npfds].fd = (SOCKET)e->fd;
       pfds[npfds].events = 0;
       if ((e->mask & SCRP_READABLE) != 0) pfds[npfds].events |= POLLRDNORM;
@@ -228,28 +267,40 @@ int scrp_drain(ScrPoller *p, ScrPollerEvent *out, int max) {
     }
     i++;
   }
-  /* Socket readiness: poll the whole table with a zero timeout. */
-  enum { SCRP_BATCH = 64 };
-  WSAPOLLFD pfds[SCRP_BATCH];
-  ScrpEntry *owners[SCRP_BATCH];
+  /* Socket readiness: poll the WHOLE table with a zero timeout — never a
+   * fixed-size slice of it (the swap-remove shuffle would starve whatever
+   * lands past the slice: measured as the listener freezing for seconds
+   * at ~85 fds). The scratch grows with the table and is reused. */
+  if (!scrp_pfds_reserve(p, p->n)) return filled; /* OOM: retry next pass */
   ULONG npfds = 0;
-  for (size_t i = 0; i < p->n && npfds < SCRP_BATCH; i++) {
+  for (size_t i = 0; i < p->n; i++) {
     ScrpEntry *e = &p->entries[i];
     if ((e->mask & SCRP_TIMER) != 0) continue;
-    pfds[npfds].fd = (SOCKET)e->fd;
-    pfds[npfds].events = 0;
-    if ((e->mask & SCRP_READABLE) != 0) pfds[npfds].events |= POLLRDNORM;
-    if ((e->mask & SCRP_WRITABLE) != 0) pfds[npfds].events |= POLLWRNORM;
-    pfds[npfds].revents = 0;
-    owners[npfds++] = e;
+    p->pfds[npfds].fd = (SOCKET)e->fd;
+    p->pfds[npfds].events = 0;
+    if ((e->mask & SCRP_READABLE) != 0) p->pfds[npfds].events |= POLLRDNORM;
+    if ((e->mask & SCRP_WRITABLE) != 0) p->pfds[npfds].events |= POLLWRNORM;
+    p->pfds[npfds].revents = 0;
+    p->owners[npfds++] = e;
   }
   if (npfds == 0 || filled >= max) return filled;
-  int n = WSAPoll(pfds, npfds, 0);
+  int n = WSAPoll(p->pfds, npfds, 0);
   if (n <= 0) return filled; /* none/failed: a spurious pass */
-  for (ULONG i = 0; i < npfds && filled < max; i++) {
-    SHORT re = pfds[i].revents;
+  /* Report from a rotating start: with more ready fds than out[] slots the
+   * next drain resumes past the last reported entry instead of re-serving
+   * the table head. */
+  size_t start = p->rr % npfds;
+  size_t stopped = 0;
+  for (ULONG k = 0; k < npfds; k++) {
+    if (filled >= max) {
+      stopped = (start + k) % npfds;
+      p->rr = stopped;
+      return filled;
+    }
+    ULONG i = (ULONG)((start + k) % npfds);
+    SHORT re = p->pfds[i].revents;
     if (re == 0) continue;
-    ScrpEntry *e = owners[i];
+    ScrpEntry *e = p->owners[i];
     unsigned got = 0;
     if ((re & (POLLRDNORM | POLLHUP | POLLERR | POLLNVAL)) != 0) got |= SCRP_READABLE;
     if ((re & POLLWRNORM) != 0 || ((re & (POLLHUP | POLLERR | POLLNVAL)) != 0 && (e->mask & SCRP_WRITABLE) != 0))
