@@ -2178,6 +2178,19 @@ static bool (*scr_win32_wait_fn)(double timeout_ms) = NULL;
 
 void scr_loop_set_win32_wait(bool (*wait)(double timeout_ms)) { scr_win32_wait_fn = wait; }
 
+/* The win32 wake event (scr_events.c when linked): the self-pipe analog —
+ * the idle sleep waits on it alongside the timer, so signal flags and the
+ * stdin waiter thread wake the loop the moment they fire instead of
+ * riding a polling cap. */
+static void *scr_win32_wake_event = NULL;
+void scr_loop_set_win32_wake_event(void *event) { scr_win32_wake_event = event; }
+
+/* True when every surface the events unit watches (signals/stdin) can
+ * wake the sleep through the event above — the evw polling cap lifts
+ * exactly then. */
+static bool (*scr_evw_waitable_fn)(void) = NULL;
+void scr_loop_set_win32_evw_waitable(bool (*fn)(void)) { scr_evw_waitable_fn = fn; }
+
 /* The dgram hook (scr_dgram.c, when linked) — the net hook's exact shape:
  * one more set of nullable slots, byte-identical loop behavior when
  * unset. */
@@ -2262,7 +2275,12 @@ static void scr_win32_idle_sleep(double wait_ms) {
     due.QuadPart = -(LONGLONG)(wait_ms * 10000.0); /* relative, 100ns units */
     if (due.QuadPart >= 0) due.QuadPart = -1;
     if (SetWaitableTimer(hr_timer, &due, 0, NULL, NULL, FALSE)) {
-      WaitForSingleObject(hr_timer, INFINITE);
+      if (scr_win32_wake_event != NULL) {
+        HANDLE hs[2] = {hr_timer, (HANDLE)scr_win32_wake_event};
+        WaitForMultipleObjects(2, hs, FALSE, INFINITE);
+      } else {
+        WaitForSingleObject(hr_timer, INFINITE);
+      }
       return;
     }
   }
@@ -2531,24 +2549,28 @@ bool scr_loop_run(ScrPromise *top_level) {
        * reorder a socket emit past a short timer). When the caps ever
        * show up in a profile, the upgrade is a real waitable arm —
        * WaitForMultipleObjects over WSAEVENTs, or IOCP. */
-      /* Stdin-consuming sidecars live on this cap: a request/response peer
-       * blocked on our stdout sees the whole cap as round-trip latency, so
-       * the events probe runs at the same ~1ms granularity as sockets (the
-       * 50ms signal cap was sized for Ctrl-C responsiveness, not for stdin
-       * as a data plane). */
-      if (evw && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
+      bool sockets = net || dgram || watch;
+      bool socket_wait = sockets && scr_win32_wait_fn != NULL;
+      /* Events (signals/stdin): capped only when they can't wake the sleep
+       * themselves (no wake event registered, console stdin) or when the
+       * WSAPoll wait owns the sleep (an event can't join a socket poll).
+       * With the waiter thread + wake event the cap lifts entirely — a
+       * stdio request/response sidecar wakes on arrival. The 50ms signal
+       * cap this replaced was sized for Ctrl-C, not stdin as a data
+       * plane. */
+      bool evw_waitable = scr_evw_waitable_fn != NULL && scr_evw_waitable_fn();
+      if (evw && (!evw_waitable || socket_wait) && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       /* Socket readiness: with the waitable arm registered the WSAPoll wait
        * wakes on arrival, so the deadline needs no polling cap; without it
        * (or when it has nothing to watch) the capped sleep still bounds the
        * drain latency. */
-      bool sockets = net || dgram || watch;
-      if (sockets && scr_win32_wait_fn == NULL && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
+      if (sockets && !socket_wait && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (ffi && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (kids && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (due > now) {
         double wait = due - now;
 #if defined(_WIN32)
-        bool waited = sockets && scr_win32_wait_fn != NULL && scr_win32_wait_fn(wait);
+        bool waited = socket_wait && scr_win32_wait_fn(wait);
         if (!waited) {
           /* Declined wait (no watched fds yet): the cap bounds readiness
            * latency for whatever the poller picks up next turn. */

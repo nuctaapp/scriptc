@@ -6109,6 +6109,16 @@ void scr_loop_set_net(bool (*pending)(void), void (*dispatch)(void), int (*pollf
  * false when it has nothing to wait on (no sockets watched); the loop
  * falls back to its idle sleep. Off-win32 the slot stays NULL. */
 void scr_loop_set_win32_wait(bool (*wait)(double timeout_ms));
+/* Win32-only wake event (scr_events.c registers a manual-reset event
+ * HANDLE, passed as void* to keep windows.h out of this header): the
+ * idle sleep waits on it alongside its timer — the self-pipe analog for
+ * signal flags and the stdin waiter thread. */
+void scr_loop_set_win32_wake_event(void *event);
+/* Win32-only: true when the events unit's watched surfaces can wake the
+ * sleep through that event (signals always; stdin once its waiter thread
+ * runs, or when it has no consumer) — the loop lifts the evw polling cap
+ * exactly then. */
+void scr_loop_set_win32_evw_waitable(bool (*fn)(void));
 /* True when fibers are queued on the microtask ready queue — dispatch
  * hooks use it to yield between event batches so promise jobs interleave
  * (net's sweep/drain alternation). */

@@ -100,6 +100,47 @@ static volatile sig_atomic_t scr_sig_flag[SCR_SIG_MAX];
 static volatile sig_atomic_t scr_sig_any = 0;
 static int scr_wake_pipe[2] = {-1, -1};
 
+#ifdef _WIN32
+/* The win32 self-pipe analog: a manual-reset event the loop's idle sleep
+ * waits on alongside its timer (scr_loop_set_win32_wake_event). Set by
+ * the signal handler (msvcrt delivers Ctrl-C on its own thread, so
+ * SetEvent is legal there) and by the stdin waiter thread below; RESET at
+ * dispatch top BEFORE draining state, so a set that races the drain costs
+ * one spurious wake, never a lost one. */
+static HANDLE scr_win32_wake_evt = NULL;
+
+/* Stdin waiter thread (PIPE stdin only): parks in a 1-byte blocking
+ * ReadFile so the loop can sleep uncapped and still wake the moment a
+ * request arrives. Exactly one byte is in flight: it hands off through
+ * scr_stdin_thread_byte under the has_byte flag, and the thread waits for
+ * the consumer (resume event) before reading again — the service path
+ * drains the pipe's remaining bytes itself, so ordering never splits. */
+static HANDLE scr_stdin_thread = NULL;
+static HANDLE scr_stdin_resume_evt = NULL; /* auto-reset: byte consumed */
+static unsigned char scr_stdin_thread_byte = 0;
+static volatile LONG scr_stdin_thread_has_byte = 0;
+static volatile LONG scr_stdin_thread_eof = 0;
+
+static DWORD WINAPI scr_stdin_thread_main(LPVOID arg) {
+  HANDLE h = (HANDLE)arg;
+  for (;;) {
+    unsigned char b = 0;
+    DWORD got = 0;
+    if (!ReadFile(h, &b, 1, &got, NULL) || got == 0) {
+      /* Broken pipe / EOF: flag it and wake — the service path's read(2)
+       * delivers the actual end-of-stream. */
+      InterlockedExchange(&scr_stdin_thread_eof, 1);
+      if (scr_win32_wake_evt != NULL) SetEvent(scr_win32_wake_evt);
+      return 0;
+    }
+    scr_stdin_thread_byte = b;
+    InterlockedExchange(&scr_stdin_thread_has_byte, 1);
+    if (scr_win32_wake_evt != NULL) SetEvent(scr_win32_wake_evt);
+    if (WaitForSingleObject(scr_stdin_resume_evt, INFINITE) != WAIT_OBJECT_0) return 0;
+  }
+}
+#endif
+
 static void scr_sig_handler(int sig) {
   if (sig < 0 || sig >= SCR_SIG_MAX) return;
 #ifdef _WIN32
@@ -111,6 +152,9 @@ static void scr_sig_handler(int sig) {
 #endif
   scr_sig_flag[sig] = 1;
   scr_sig_any = 1;
+#ifdef _WIN32
+  if (scr_win32_wake_evt != NULL) SetEvent(scr_win32_wake_evt);
+#endif
   if (scr_wake_pipe[1] >= 0) {
     ssize_t ignored = write(scr_wake_pipe[1], "s", 1);
     (void)ignored; /* a full pipe still wakes the poller */
@@ -518,8 +562,26 @@ static void scr_stdin_service(void) {
   if (h != NULL && h != INVALID_HANDLE_VALUE) {
     DWORD type = GetFileType(h);
     if (type == FILE_TYPE_PIPE) {
-      DWORD avail = 0;
-      if (PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) && avail == 0) return;
+      /* Pipe stdin gets the waiter thread on first service: from then on
+       * readiness is the thread's handoff (and the loop's sleep waits on
+       * the wake event instead of a polling cap). A spawn failure just
+       * keeps the Peek probe. */
+      if (scr_stdin_thread == NULL && !scr_stdin_thread_eof) {
+        scr_stdin_resume_evt = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (scr_stdin_resume_evt != NULL) {
+          scr_stdin_thread = CreateThread(NULL, 64 * 1024, scr_stdin_thread_main, h, 0, NULL);
+          if (scr_stdin_thread == NULL) {
+            CloseHandle(scr_stdin_resume_evt);
+            scr_stdin_resume_evt = NULL;
+          }
+        }
+      }
+      if (scr_stdin_thread != NULL) {
+        if (!scr_stdin_thread_has_byte && !scr_stdin_thread_eof) return;
+      } else {
+        DWORD avail = 0;
+        if (PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) && avail == 0) return;
+      }
     } else if (type == FILE_TYPE_CHAR) {
       if (WaitForSingleObject(h, 0) != WAIT_OBJECT_0) return;
     }
@@ -534,7 +596,29 @@ static void scr_stdin_service(void) {
   if (rc <= 0 || !(pfd.revents & (POLLIN | POLLHUP | POLLERR))) return;
 #endif
   char buf[65536];
-  ssize_t n = read(0, buf, sizeof buf);
+  ssize_t n;
+#ifdef _WIN32
+  if (scr_stdin_thread != NULL &&
+      InterlockedCompareExchange(&scr_stdin_thread_has_byte, 0, 1) == 1) {
+    /* The thread's byte leads; the pipe's remaining bytes (if any) follow
+     * via a non-blocking drain — read only what Peek reports. The thread
+     * resumes AFTER that drain, so it can't race us for pipe bytes. */
+    buf[0] = (char)scr_stdin_thread_byte;
+    n = 1;
+    DWORD avail = 0;
+    if (h != NULL && h != INVALID_HANDLE_VALUE &&
+        PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+      size_t want = (size_t)avail < sizeof buf - 1 ? (size_t)avail : sizeof buf - 1;
+      ssize_t extra = read(0, buf + 1, (unsigned)want);
+      if (extra > 0) n += extra;
+    }
+    SetEvent(scr_stdin_resume_evt);
+  } else {
+    n = read(0, buf, sizeof buf);
+  }
+#else
+  n = read(0, buf, sizeof buf);
+#endif
   if (n < 0) {
     if (errno == EINTR || errno == EAGAIN) return;
     /* Real read failure: 'error' listeners get Node's Error shape via the
@@ -707,9 +791,26 @@ static bool scr_events_watching(void) {
   return scr_sig_watched > 0 || scr_stdin_pending();
 }
 
+#ifdef _WIN32
+/* True when every surface this unit watches wakes the loop through the
+ * wake event: signals always do (the handler sets it); stdin does once
+ * the waiter thread runs or the stream ended. Console stdin can't be
+ * waited without consuming input, so it keeps the loop's polling cap. */
+static bool scr_events_win32_waitable(void) {
+  if (scr_win32_wake_evt == NULL) return false;
+  if (!scr_stdin_pending()) return true;
+  return scr_stdin_thread != NULL || scr_stdin_thread_eof != 0;
+}
+#endif
+
 /* One dispatch pass at a loop turn: wake-pipe bytes are consumed (safe
  * any time), flagged signals fire, and stdin is probed/served. */
 static void scr_events_dispatch(void) {
+#ifdef _WIN32
+  /* Reset-then-check: a SetEvent racing this reset re-signals for the
+   * NEXT sleep; state set before it is visible to the drains below. */
+  if (scr_win32_wake_evt != NULL) ResetEvent(scr_win32_wake_evt);
+#endif
   scr_wake_pipe_drain();
   scr_signals_drain();
   if (scr_exc_pending()) return;
@@ -753,6 +854,13 @@ void scr_events_install(void) {
 #endif
   atexit(scr_events_cleanup_atexit);
   atexit(scr_exit_atexit);
+#ifdef _WIN32
+  scr_win32_wake_evt = CreateEventW(NULL, TRUE, FALSE, NULL); /* manual reset */
+  if (scr_win32_wake_evt != NULL) {
+    scr_loop_set_win32_wake_event((void *)scr_win32_wake_evt);
+    scr_loop_set_win32_evw_waitable(&scr_events_win32_waitable);
+  }
+#endif
   scr_loop_set_events(&scr_events_pending, &scr_events_watching, &scr_events_dispatch,
                        &scr_events_pollfds);
   scr_process_exit_hook = &scr_run_exit_listeners;
