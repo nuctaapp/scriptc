@@ -685,6 +685,16 @@ int scr_island_drain_jobs(void) {
       const char *msg = JS_ToCString(jctx, exc);
       fflush(stdout);
       fprintf(stderr, "Uncaught %s\n", msg ? msg : "island job exception");
+      /* diag: dump the engine stack so module-load failures are locatable */
+      {
+        JSValue st = JS_GetPropertyStr(jctx, exc, "stack");
+        const char *sts = JS_IsException(st) ? NULL : JS_ToCString(jctx, st);
+        if (sts) {
+          fprintf(stderr, "[island stack]\n%s\n", sts);
+          JS_FreeCString(jctx, sts);
+        }
+        if (!JS_IsException(st)) JS_FreeValue(jctx, st);
+      }
       if (msg) JS_FreeCString(jctx, msg);
       JS_FreeValue(jctx, exc);
       _Exit(1);
@@ -764,6 +774,16 @@ static ScrStr *isl_prop_str(JSValueConst obj, const char *prop, const char *fall
  * promise bridge (isl_bridge_settle). */
 static void isl_throw_reason(JSValueConst exc) {
   if (JS_IsError(exc)) {
+    /* diag: engine stacks do not cross the bridge — dump to stderr here */
+    {
+      JSValue st = JS_GetPropertyStr(isl_ctx, exc, "stack");
+      const char *sts = JS_IsException(st) ? NULL : JS_ToCString(isl_ctx, st);
+      if (sts) {
+        fprintf(stderr, "[island bridge stack]\n%s\n", sts);
+        JS_FreeCString(isl_ctx, sts);
+      }
+      if (!JS_IsException(st)) JS_FreeValue(isl_ctx, st);
+    }
     scr_throw_error_named(isl_prop_str(exc, "name", "Error"),
                            isl_prop_str(exc, "message", ""));
     return;
