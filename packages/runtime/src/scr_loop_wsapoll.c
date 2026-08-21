@@ -82,19 +82,82 @@ static bool scrp_push(ScrPoller *p, ScrpEntry e) {
   return true;
 }
 
+/* Live-poller registry for the loop's waitable arm: every poller the units
+ * create joins here so scrp_wait_any can WSAPoll the union of their socket
+ * tables with a REAL timeout — the loop wakes on readiness instead of
+ * probing at the capped sleep's granularity. A handful of units each own
+ * one poller (net/dgram/watch), so a small fixed table covers it; overflow
+ * just leaves a poller un-waited (its readiness is still picked up by the
+ * dispatch drain, at fallback-cap latency). */
+enum { SCRP_MAX_LIVE = 8 };
+static ScrPoller *scrp_live[SCRP_MAX_LIVE];
+static size_t scrp_nlive = 0;
+
+static bool scrp_wait_any(double timeout_ms);
+
 ScrPoller *scrp_poller_new(void) {
   WSADATA wsa;
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return NULL;
   ScrPoller *p = calloc(1, sizeof *p);
-  if (p == NULL) WSACleanup();
+  if (p == NULL) {
+    WSACleanup();
+    return NULL;
+  }
+  if (scrp_nlive < SCRP_MAX_LIVE) scrp_live[scrp_nlive++] = p;
+  scr_loop_set_win32_wait(&scrp_wait_any);
   return p;
 }
 
 void scrp_poller_free(ScrPoller *p) {
   if (p == NULL) return;
+  for (size_t i = 0; i < scrp_nlive; i++) {
+    if (scrp_live[i] == p) {
+      scrp_live[i] = scrp_live[scrp_nlive - 1];
+      scrp_nlive--;
+      break;
+    }
+  }
   free(p->entries);
   free(p);
   WSACleanup();
+}
+
+/* The loop's blocking wait: the union of every live poller's socket
+ * interest, WSAPolled with the loop's timeout clamped by the earliest
+ * armed one-shot deadline (those expire in scrp_drain, which only runs at
+ * the next turn — an uncapped wait would sit past them). Returns false
+ * when there is nothing to wait on; readiness itself is NOT consumed here,
+ * the zero-timeout drain at dispatch reports it exactly as before. */
+static bool scrp_wait_any(double timeout_ms) {
+  enum { SCRP_WAIT_BATCH = 256 };
+  WSAPOLLFD pfds[SCRP_WAIT_BATCH];
+  ULONG npfds = 0;
+  double now = scr_now_ms();
+  double limit = timeout_ms;
+  for (size_t pi = 0; pi < scrp_nlive; pi++) {
+    ScrPoller *p = scrp_live[pi];
+    for (size_t i = 0; i < p->n; i++) {
+      ScrpEntry *e = &p->entries[i];
+      if ((e->mask & SCRP_TIMER) != 0) {
+        double left = e->deadline - now;
+        if (left < limit) limit = left;
+        continue;
+      }
+      if (npfds >= SCRP_WAIT_BATCH) continue;
+      pfds[npfds].fd = (SOCKET)e->fd;
+      pfds[npfds].events = 0;
+      if ((e->mask & SCRP_READABLE) != 0) pfds[npfds].events |= POLLRDNORM;
+      if ((e->mask & SCRP_WRITABLE) != 0) pfds[npfds].events |= POLLWRNORM;
+      pfds[npfds].revents = 0;
+      npfds++;
+    }
+  }
+  if (npfds == 0) return false;
+  if (limit <= 0) return true; /* a deadline already passed: dispatch now */
+  int wait = limit >= 2147483647.0 ? 2147483647 : (int)limit;
+  if (wait < 1) wait = 1;
+  WSAPoll(pfds, npfds, wait);
+  return true;
 }
 
 int scrp_poller_fd(const ScrPoller *p) {

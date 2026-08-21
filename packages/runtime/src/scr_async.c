@@ -2172,6 +2172,12 @@ void scr_loop_set_net(bool (*pending)(void), void (*dispatch)(void), int (*pollf
   scr_net_pollfd_fn = pollfd;
 }
 
+/* The win32 waitable arm (scr_loop_wsapoll.c when linked): NULL means the
+ * capped idle sleep serves socket readiness, exactly the old behavior. */
+static bool (*scr_win32_wait_fn)(double timeout_ms) = NULL;
+
+void scr_loop_set_win32_wait(bool (*wait)(double timeout_ms)) { scr_win32_wait_fn = wait; }
+
 /* The dgram hook (scr_dgram.c, when linked) — the net hook's exact shape:
  * one more set of nullable slots, byte-identical loop behavior when
  * unset. */
@@ -2232,7 +2238,61 @@ void scr_loop_set_stream(bool (*pending)(void), void (*dispatch)(void)) {
  * microtask checkpoints between macrotasks). */
 bool scr_loop_has_ready(void) { return scr_ready_len > 0; }
 
+#if defined(_WIN32)
+/* Idle sleep for the loop's capped waits. mingw-w64's nanosleep rounds every
+ * sub-tick wait up to the 15.625ms system tick and does NOT honor a raised
+ * timer resolution (measured on Win10: nanosleep(1ms) ~15.3ms even under
+ * timeBeginPeriod(1), while Sleep(1) drops to ~1.9ms and a high-resolution
+ * waitable timer hits ~1.7ms without touching the global tick). The ~1ms
+ * loop cap only means ~1ms if the primitive can actually wake that fast, so
+ * the sleep goes through CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Win10 1803+),
+ * falling back to Sleep — which the timeBeginPeriod(1) raise in scr_loop_run
+ * keeps near 1ms — on older hosts. */
+static void scr_win32_idle_sleep(double wait_ms) {
+  static HANDLE hr_timer = NULL;
+  static bool hr_timer_tried = false;
+  if (!hr_timer_tried) {
+    hr_timer_tried = true;
+    hr_timer = CreateWaitableTimerExW(NULL, NULL,
+                                      0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */,
+                                      TIMER_ALL_ACCESS);
+  }
+  if (hr_timer != NULL) {
+    LARGE_INTEGER due;
+    due.QuadPart = -(LONGLONG)(wait_ms * 10000.0); /* relative, 100ns units */
+    if (due.QuadPart >= 0) due.QuadPart = -1;
+    if (SetWaitableTimer(hr_timer, &due, 0, NULL, NULL, FALSE)) {
+      WaitForSingleObject(hr_timer, INFINITE);
+      return;
+    }
+  }
+  Sleep(wait_ms < 1.0 ? 1 : (DWORD)wait_ms);
+}
+#endif
+
 bool scr_loop_run(ScrPromise *top_level) {
+#if defined(_WIN32)
+  /* Raise the per-process timer resolution to 1ms (Node and Chromium do
+   * the same): the loop's win32 arm sleeps in ~1ms nanosleep slices, but
+   * under the default 15.625ms system tick every one of those rounds up
+   * to a full tick — socket/stdio wakeups quantize to ~15.6ms (p50) and
+   * loopback latency multiplies. LoadLibrary keeps winmm out of the link
+   * line; timeEndPeriod at exit is intentionally skipped (process death
+   * releases the request). */
+  {
+    static bool timer_res_raised = false;
+    if (!timer_res_raised) {
+      timer_res_raised = true;
+      HMODULE winmm = LoadLibraryA("winmm.dll");
+      if (winmm != NULL) {
+        typedef UINT(WINAPI * TimeBeginPeriodFn)(UINT);
+        TimeBeginPeriodFn tbp =
+            (TimeBeginPeriodFn)(void *)GetProcAddress(winmm, "timeBeginPeriod");
+        if (tbp != NULL) tbp(1);
+      }
+    }
+  }
+#endif
   /* The FIRST checkpoint after the synchronous main body runs promise
    * jobs BEFORE the first tick drain: Node's main-module evaluation is
    * itself awaited (the runMain continuation is a microtask queued after
@@ -2471,14 +2531,34 @@ bool scr_loop_run(ScrPromise *top_level) {
        * reorder a socket emit past a short timer). When the caps ever
        * show up in a profile, the upgrade is a real waitable arm —
        * WaitForMultipleObjects over WSAEVENTs, or IOCP. */
-      if (evw && due > now + SCR_SIGNAL_POLL_MS) due = now + SCR_SIGNAL_POLL_MS;
-      if ((net || dgram || watch) && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
+      /* Stdin-consuming sidecars live on this cap: a request/response peer
+       * blocked on our stdout sees the whole cap as round-trip latency, so
+       * the events probe runs at the same ~1ms granularity as sockets (the
+       * 50ms signal cap was sized for Ctrl-C responsiveness, not for stdin
+       * as a data plane). */
+      if (evw && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
+      /* Socket readiness: with the waitable arm registered the WSAPoll wait
+       * wakes on arrival, so the deadline needs no polling cap; without it
+       * (or when it has nothing to watch) the capped sleep still bounds the
+       * drain latency. */
+      bool sockets = net || dgram || watch;
+      if (sockets && scr_win32_wait_fn == NULL && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (ffi && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (kids && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (due > now) {
         double wait = due - now;
+#if defined(_WIN32)
+        bool waited = sockets && scr_win32_wait_fn != NULL && scr_win32_wait_fn(wait);
+        if (!waited) {
+          /* Declined wait (no watched fds yet): the cap bounds readiness
+           * latency for whatever the poller picks up next turn. */
+          if (sockets && wait > SCR_CHILD_POLL_MS) wait = SCR_CHILD_POLL_MS;
+          scr_win32_idle_sleep(wait);
+        }
+#else
         struct timespec ts = {(time_t)(wait / 1000.0), (long)((wait - (double)((time_t)(wait / 1000.0)) * 1000.0) * 1e6)};
         nanosleep(&ts, NULL);
+#endif
       }
       now = scr_now_ms();
 #else
@@ -2571,8 +2651,12 @@ bool scr_loop_run(ScrPromise *top_level) {
       if (kids && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
       if (due > now) {
         double wait = due - now;
+#if defined(_WIN32)
+        scr_win32_idle_sleep(wait);
+#else
         struct timespec ts = {(time_t)(wait / 1000.0), (long)((wait - (double)((time_t)(wait / 1000.0)) * 1000.0) * 1e6)};
         nanosleep(&ts, NULL);
+#endif
         now = due;
       }
     }

@@ -6102,6 +6102,13 @@ void scr_tls_fetch_client_wrap(ScrNetSocket *sock, void *ctx);
  * events hook, and `pollfd` exposes the unit's poller fd so the idle
  * poll(2) sleep wakes on socket readiness (-1 = no fd yet). */
 void scr_loop_set_net(bool (*pending)(void), void (*dispatch)(void), int (*pollfd)(void));
+/* Win32-only waitable arm (scr_loop_wsapoll.c registers it when a poller
+ * unit links): a BLOCKING readiness wait over every live poller's socket
+ * table — WSAPoll with a real timeout instead of the blind capped sleep,
+ * so a loopback exchange wakes on arrival like the poll(2) arm. Returns
+ * false when it has nothing to wait on (no sockets watched); the loop
+ * falls back to its idle sleep. Off-win32 the slot stays NULL. */
+void scr_loop_set_win32_wait(bool (*wait)(double timeout_ms));
 /* True when fibers are queued on the microtask ready queue — dispatch
  * hooks use it to yield between event batches so promise jobs interleave
  * (net's sweep/drain alternation). */
