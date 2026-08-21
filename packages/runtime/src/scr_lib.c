@@ -3729,6 +3729,370 @@ ScrStr *scr_crypto_hash_digest_bytes(ScrStr *alg, ScrBytes *data, ScrStr *enc) {
   return scr_hash_digest_raw(alg, data->data, data->len * scr_bytes_elem_size(data->elem), enc);
 }
 
+/* The bare-Buffer digest — createHash(alg).update(data).digest() with no
+ * encoding: the raw digest bytes as a fresh Buffer (Node's default). */
+static ScrBytes *scr_hash_digest_raw_bytes(const ScrStr *alg, const unsigned char *data, size_t len) {
+  unsigned char d[32];
+  size_t n = (alg->len == 4 && memcmp(alg->data, "sha1", 4) == 0)
+                 ? scr_sha1_digest(data, len, d)
+                 : scr_sha256_digest(data, len, d);
+  ScrBytes *b = scr_bytes_new(SCR_BYTES_U8, (double)n);
+  memcpy(b->data, d, n);
+  return b;
+}
+
+ScrBytes *scr_crypto_hash_digest_str_raw(ScrStr *alg, ScrStr *data) {
+  return scr_hash_digest_raw_bytes(alg, (const unsigned char *)data->data, data->len);
+}
+
+ScrBytes *scr_crypto_hash_digest_bytes_raw(ScrStr *alg, ScrBytes *data) {
+  return scr_hash_digest_raw_bytes(alg, data->data, data->len * scr_bytes_elem_size(data->elem));
+}
+
+/* The composed HMAC chain createHmac(alg, key).update(data).digest(enc) —
+ * fused like the Hash chain (no Hmac handle exists). Key comes as a
+ * string (UTF-8 bytes) or a Buffer; data is a string. Borrowed; +1. */
+static ScrStr *scr_hmac_digest_enc(const ScrStr *alg, const unsigned char *key, size_t keylen,
+                                   const unsigned char *data, size_t len, const ScrStr *enc) {
+  char algz[8];
+  size_t an = alg->len < sizeof algz - 1 ? alg->len : sizeof algz - 1;
+  memcpy(algz, alg->data, an);
+  algz[an] = 0;
+  unsigned char d[32];
+  size_t n = scr_crypto_hmac_raw(algz, key, keylen, data, len, d);
+  return scr_digest_encode(d, n, enc);
+}
+
+ScrStr *scr_crypto_hmac_digest_ks(ScrStr *alg, ScrStr *key, ScrStr *data, ScrStr *enc) {
+  return scr_hmac_digest_enc(alg, (const unsigned char *)key->data, key->len,
+                             (const unsigned char *)data->data, data->len, enc);
+}
+
+ScrStr *scr_crypto_hmac_digest_kb(ScrStr *alg, ScrBytes *key, ScrStr *data, ScrStr *enc) {
+  return scr_hmac_digest_enc(alg, key->data, key->len * scr_bytes_elem_size(key->elem),
+                             (const unsigned char *)data->data, data->len, enc);
+}
+
+/* crypto.timingSafeEqual(a, b) — constant-time comparison. Node throws
+ * RangeError (ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH) on length mismatch. */
+bool scr_crypto_timing_safe_equal(ScrBytes *a, ScrBytes *b) {
+  size_t alen = a->len * scr_bytes_elem_size(a->elem);
+  size_t blen = b->len * scr_bytes_elem_size(b->elem);
+  if (alen != blen) {
+    static const char msg[] = "Input buffers must have the same byte length";
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, sizeof msg - 1,
+                             "ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH");
+    return false;
+  }
+  unsigned char acc = 0;
+  for (size_t i = 0; i < alen; i++) acc |= a->data[i] ^ b->data[i];
+  return acc == 0;
+}
+
+/* ── scrypt (RFC 7914) — Node's scryptSync with the default parameters
+ * (N=16384, r=8, p=1), the only form the compiler lowers. Composed from
+ * the HMAC-SHA256 above (PBKDF2) and Salsa20/8 Core. ─────────────────── */
+
+static void scr_salsa208_core(uint32_t out[16], const uint32_t in[16]) {
+  uint32_t x[16];
+  memcpy(x, in, sizeof x);
+#define SCR_R(v, c) (((v) << (c)) | ((v) >> (32 - (c))))
+  for (int i = 0; i < 8; i += 2) {
+    x[4] ^= SCR_R(x[0] + x[12], 7);   x[8] ^= SCR_R(x[4] + x[0], 9);
+    x[12] ^= SCR_R(x[8] + x[4], 13);  x[0] ^= SCR_R(x[12] + x[8], 18);
+    x[9] ^= SCR_R(x[5] + x[1], 7);    x[13] ^= SCR_R(x[9] + x[5], 9);
+    x[1] ^= SCR_R(x[13] + x[9], 13);  x[5] ^= SCR_R(x[1] + x[13], 18);
+    x[14] ^= SCR_R(x[10] + x[6], 7);  x[2] ^= SCR_R(x[14] + x[10], 9);
+    x[6] ^= SCR_R(x[2] + x[14], 13);  x[10] ^= SCR_R(x[6] + x[2], 18);
+    x[3] ^= SCR_R(x[15] + x[11], 7);  x[7] ^= SCR_R(x[3] + x[15], 9);
+    x[11] ^= SCR_R(x[7] + x[3], 13);  x[15] ^= SCR_R(x[11] + x[7], 18);
+    x[1] ^= SCR_R(x[0] + x[3], 7);    x[2] ^= SCR_R(x[1] + x[0], 9);
+    x[3] ^= SCR_R(x[2] + x[1], 13);   x[0] ^= SCR_R(x[3] + x[2], 18);
+    x[6] ^= SCR_R(x[5] + x[4], 7);    x[7] ^= SCR_R(x[6] + x[5], 9);
+    x[4] ^= SCR_R(x[7] + x[6], 13);   x[5] ^= SCR_R(x[4] + x[7], 18);
+    x[11] ^= SCR_R(x[10] + x[9], 7);  x[8] ^= SCR_R(x[11] + x[10], 9);
+    x[9] ^= SCR_R(x[8] + x[11], 13);  x[10] ^= SCR_R(x[9] + x[8], 18);
+    x[12] ^= SCR_R(x[15] + x[14], 7); x[13] ^= SCR_R(x[12] + x[15], 9);
+    x[14] ^= SCR_R(x[13] + x[12], 13); x[15] ^= SCR_R(x[14] + x[13], 18);
+  }
+#undef SCR_R
+  for (int i = 0; i < 16; i++) out[i] = x[i] + in[i];
+}
+
+/* BlockMix_salsa208 over 2r 64-byte blocks (in/out don't alias). */
+static void scr_scrypt_blockmix(uint32_t *out, const uint32_t *in, uint32_t r) {
+  uint32_t X[16];
+  memcpy(X, &in[(2 * r - 1) * 16], sizeof X);
+  for (uint32_t i = 0; i < 2 * r; i++) {
+    uint32_t T[16];
+    for (int j = 0; j < 16; j++) T[j] = X[j] ^ in[i * 16 + j];
+    scr_salsa208_core(X, T);
+    /* Even blocks land in the first half, odd in the second (RFC 7914). */
+    memcpy(&out[((i / 2) + (i & 1) * r) * 16], X, sizeof X);
+  }
+}
+
+/* PBKDF2-HMAC-SHA256 (RFC 2898) — c iterations, dk of dklen bytes. */
+static void scr_pbkdf2_sha256(const unsigned char *pw, size_t pwlen,
+                              const unsigned char *salt, size_t saltlen,
+                              uint32_t c, unsigned char *dk, size_t dklen) {
+  unsigned char *block = malloc(saltlen + 4);
+  if (!block) { scr_trap("scriptc: out of memory\n"); return; }
+  memcpy(block, salt, saltlen);
+  uint32_t i = 1;
+  size_t off = 0;
+  while (off < dklen) {
+    block[saltlen] = (unsigned char)(i >> 24);
+    block[saltlen + 1] = (unsigned char)(i >> 16);
+    block[saltlen + 2] = (unsigned char)(i >> 8);
+    block[saltlen + 3] = (unsigned char)i;
+    unsigned char u[32], t[32];
+    scr_crypto_hmac_raw("sha256", pw, pwlen, block, saltlen + 4, u);
+    memcpy(t, u, 32);
+    for (uint32_t k = 1; k < c; k++) {
+      scr_crypto_hmac_raw("sha256", pw, pwlen, u, 32, u);
+      for (int j = 0; j < 32; j++) t[j] ^= u[j];
+    }
+    size_t n = dklen - off < 32 ? dklen - off : 32;
+    memcpy(dk + off, t, n);
+    off += n;
+    i++;
+  }
+  free(block);
+}
+
+ScrBytes *scr_crypto_scrypt(ScrStr *password, ScrStr *salt, double keylen) {
+  if (!(keylen >= 0 && keylen <= 2147483647 && keylen == (double)(int64_t)keylen)) {
+    static const char msg[] =
+        "The value of \"keylen\" is out of range. It must be an integer. Received a non-integer or out-of-range value";
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, sizeof msg - 1, "ERR_OUT_OF_RANGE");
+    return NULL;
+  }
+  const uint32_t N = 16384, r = 8, p = 1; /* Node's defaults — the lowered form */
+  const size_t blockBytes = 128 * r; /* one B block */
+  unsigned char *B = malloc((size_t)p * blockBytes);
+  uint32_t *V = malloc((size_t)N * blockBytes);
+  uint32_t *XY = malloc(2 * blockBytes);
+  if (!B || !V || !XY) {
+    free(B); free(V); free(XY);
+    scr_trap("scriptc: out of memory\n");
+    return NULL;
+  }
+  scr_pbkdf2_sha256((const unsigned char *)password->data, password->len,
+                    (const unsigned char *)salt->data, salt->len, 1, B, (size_t)p * blockBytes);
+  for (uint32_t i = 0; i < p; i++) {
+    uint32_t *X = XY, *Y = XY + blockBytes / 4;
+    /* Little-endian load — Salsa operates on u32 words (RFC 7914 §5). */
+    for (size_t w = 0; w < blockBytes / 4; w++) {
+      const unsigned char *q = B + i * blockBytes + w * 4;
+      X[w] = (uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+    }
+    for (uint32_t k = 0; k < N; k++) {
+      memcpy(V + k * (blockBytes / 4), X, blockBytes);
+      scr_scrypt_blockmix(Y, X, r);
+      uint32_t *t = X; X = Y; Y = t;
+    }
+    for (uint32_t k = 0; k < N; k++) {
+      uint32_t j = X[(2 * r - 1) * 16] & (N - 1);
+      for (size_t w = 0; w < blockBytes / 4; w++) X[w] ^= V[j * (blockBytes / 4) + w];
+      scr_scrypt_blockmix(Y, X, r);
+      uint32_t *t = X; X = Y; Y = t;
+    }
+    for (size_t w = 0; w < blockBytes / 4; w++) {
+      unsigned char *q = B + i * blockBytes + w * 4;
+      q[0] = (unsigned char)X[w];
+      q[1] = (unsigned char)(X[w] >> 8);
+      q[2] = (unsigned char)(X[w] >> 16);
+      q[3] = (unsigned char)(X[w] >> 24);
+    }
+  }
+  ScrBytes *out = scr_bytes_new(SCR_BYTES_U8, keylen);
+  scr_pbkdf2_sha256((const unsigned char *)password->data, password->len,
+                    B, (size_t)p * blockBytes, 1, out->data, (size_t)keylen);
+  free(B); free(V); free(XY);
+  return out;
+}
+
+/* ── AES-256-GCM, one-shot (the scriptc extension aesGcmSealSync /
+ * aesGcmOpenSync — Node's createCipheriv handle has no static lowering;
+ * the single-update encrypt-then-tag idiom fuses into these). Key is 32
+ * bytes, IV 12 (the GCM-recommended length; J0 = IV || 0x00000001), tag
+ * 16. seal answers ciphertext || tag; open verifies the trailing tag in
+ * constant time and throws Node's GCM auth-failure Error on mismatch. ── */
+
+static const unsigned char scr_aes_sbox[256] = {
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16};
+
+typedef struct { uint32_t rk[60]; } ScrAes256;
+
+static uint32_t scr_aes_subword(uint32_t w) {
+  return ((uint32_t)scr_aes_sbox[(w >> 24) & 0xff] << 24) |
+         ((uint32_t)scr_aes_sbox[(w >> 16) & 0xff] << 16) |
+         ((uint32_t)scr_aes_sbox[(w >> 8) & 0xff] << 8) |
+         (uint32_t)scr_aes_sbox[w & 0xff];
+}
+
+static void scr_aes256_init(ScrAes256 *ctx, const unsigned char key[32]) {
+  static const uint32_t rcon[7] = {0x01000000, 0x02000000, 0x04000000, 0x08000000,
+                                   0x10000000, 0x20000000, 0x40000000};
+  for (int i = 0; i < 8; i++) {
+    ctx->rk[i] = ((uint32_t)key[4 * i] << 24) | ((uint32_t)key[4 * i + 1] << 16) |
+                 ((uint32_t)key[4 * i + 2] << 8) | (uint32_t)key[4 * i + 3];
+  }
+  for (int i = 8; i < 60; i++) {
+    uint32_t t = ctx->rk[i - 1];
+    if (i % 8 == 0) t = scr_aes_subword((t << 8) | (t >> 24)) ^ rcon[i / 8 - 1];
+    else if (i % 8 == 4) t = scr_aes_subword(t);
+    ctx->rk[i] = ctx->rk[i - 8] ^ t;
+  }
+}
+
+static unsigned char scr_aes_xtime(unsigned char b) {
+  return (unsigned char)((b << 1) ^ ((b & 0x80) ? 0x1b : 0));
+}
+
+static void scr_aes256_encrypt_block(const ScrAes256 *ctx, const unsigned char in[16],
+                                     unsigned char out[16]) {
+  unsigned char s[16];
+  for (int i = 0; i < 16; i++) s[i] = in[i] ^ (unsigned char)(ctx->rk[i / 4] >> (24 - 8 * (i % 4)));
+  for (int round = 1; round <= 14; round++) {
+    unsigned char t[16];
+    /* SubBytes + ShiftRows fused: t[col][row] = sbox(s[(col+row)%4][row]). */
+    for (int c = 0; c < 4; c++) {
+      for (int rr = 0; rr < 4; rr++) t[c * 4 + rr] = scr_aes_sbox[s[((c + rr) % 4) * 4 + rr]];
+    }
+    if (round < 14) {
+      for (int c = 0; c < 4; c++) {
+        unsigned char a0 = t[c * 4], a1 = t[c * 4 + 1], a2 = t[c * 4 + 2], a3 = t[c * 4 + 3];
+        unsigned char x = (unsigned char)(a0 ^ a1 ^ a2 ^ a3);
+        s[c * 4] = (unsigned char)(a0 ^ x ^ scr_aes_xtime((unsigned char)(a0 ^ a1)));
+        s[c * 4 + 1] = (unsigned char)(a1 ^ x ^ scr_aes_xtime((unsigned char)(a1 ^ a2)));
+        s[c * 4 + 2] = (unsigned char)(a2 ^ x ^ scr_aes_xtime((unsigned char)(a2 ^ a3)));
+        s[c * 4 + 3] = (unsigned char)(a3 ^ x ^ scr_aes_xtime((unsigned char)(a3 ^ a0)));
+      }
+    } else {
+      memcpy(s, t, 16);
+    }
+    for (int i = 0; i < 16; i++) s[i] ^= (unsigned char)(ctx->rk[round * 4 + i / 4] >> (24 - 8 * (i % 4)));
+  }
+  memcpy(out, s, 16);
+}
+
+/* GHASH multiply Y ← (Y ⊕ X) · H over GF(2^128), bitwise (RFC's shift
+ * variant — secrets here are short; table variants are a speed upgrade). */
+static void scr_ghash_mul(unsigned char Y[16], const unsigned char X[16], const unsigned char H[16]) {
+  unsigned char Z[16] = {0};
+  unsigned char V[16];
+  for (int i = 0; i < 16; i++) V[i] = (unsigned char)(Y[i] ^ X[i]);
+  for (int i = 0; i < 128; i++) {
+    if ((H[i / 8] >> (7 - i % 8)) & 1) {
+      for (int j = 0; j < 16; j++) Z[j] ^= V[j];
+    }
+    unsigned char lsb = V[15] & 1;
+    for (int j = 15; j > 0; j--) V[j] = (unsigned char)((V[j] >> 1) | (V[j - 1] << 7));
+    V[0] >>= 1;
+    if (lsb) V[0] ^= 0xe1;
+  }
+  memcpy(Y, Z, 16);
+}
+
+/* GCM over AES-256 with a 12-byte IV, no AAD: CTR from J0+1 over the
+ * payload, tag = GHASH(lens) encrypted with J0. */
+static void scr_aes256gcm_run(const unsigned char key[32], const unsigned char iv[12],
+                              const unsigned char *in, size_t len, unsigned char *out,
+                              const unsigned char *ghash_src, unsigned char tag[16]) {
+  ScrAes256 ctx;
+  scr_aes256_init(&ctx, key);
+  unsigned char H[16] = {0};
+  scr_aes256_encrypt_block(&ctx, H, H);
+  unsigned char J0[16];
+  memcpy(J0, iv, 12);
+  J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;
+  unsigned char ctr[16];
+  memcpy(ctr, J0, 16);
+  for (size_t off = 0; off < len; off += 16) {
+    for (int j = 15; j >= 12; j--) { if (++ctr[j]) break; }
+    unsigned char ks[16];
+    scr_aes256_encrypt_block(&ctx, ctr, ks);
+    size_t n = len - off < 16 ? len - off : 16;
+    for (size_t j = 0; j < n; j++) out[off + j] = (unsigned char)(in[off + j] ^ ks[j]);
+  }
+  unsigned char Y[16] = {0};
+  for (size_t off = 0; off < len; off += 16) {
+    unsigned char block[16] = {0};
+    size_t n = len - off < 16 ? len - off : 16;
+    memcpy(block, ghash_src + off, n);
+    scr_ghash_mul(Y, block, H);
+  }
+  unsigned char lens[16] = {0};
+  uint64_t cbits = (uint64_t)len * 8;
+  for (int j = 0; j < 8; j++) lens[15 - j] = (unsigned char)(cbits >> (8 * j));
+  scr_ghash_mul(Y, lens, H);
+  unsigned char ek[16];
+  scr_aes256_encrypt_block(&ctx, J0, ek);
+  for (int j = 0; j < 16; j++) tag[j] = (unsigned char)(Y[j] ^ ek[j]);
+}
+
+static bool scr_gcm_args_ok(const ScrBytes *key, const ScrBytes *iv) {
+  if (key->elem != SCR_BYTES_U8 || key->len != 32) {
+    static const char msg[] = "Invalid key length";
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, sizeof msg - 1, "ERR_CRYPTO_INVALID_KEYLEN");
+    return false;
+  }
+  if (iv->elem != SCR_BYTES_U8 || iv->len != 12) {
+    static const char msg[] = "Invalid initialization vector";
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, sizeof msg - 1, "ERR_CRYPTO_INVALID_IV");
+    return false;
+  }
+  return true;
+}
+
+ScrBytes *scr_crypto_aes256gcm_seal(ScrBytes *key, ScrBytes *iv, ScrStr *plain) {
+  if (!scr_gcm_args_ok(key, iv)) return NULL;
+  ScrBytes *out = scr_bytes_new(SCR_BYTES_U8, (double)(plain->len + 16));
+  scr_aes256gcm_run(key->data, iv->data, (const unsigned char *)plain->data, plain->len,
+                    out->data, out->data, out->data + plain->len);
+  return out;
+}
+
+ScrBytes *scr_crypto_aes256gcm_open(ScrBytes *key, ScrBytes *iv, ScrBytes *sealed) {
+  if (!scr_gcm_args_ok(key, iv)) return NULL;
+  size_t total = sealed->len * scr_bytes_elem_size(sealed->elem);
+  if (total < 16) {
+    static const char msg[] = "Unsupported state or unable to authenticate data";
+    scr_throw_error_msg(SCR_ERR_ERROR, msg, sizeof msg - 1);
+    return NULL;
+  }
+  size_t clen = total - 16;
+  ScrBytes *out = scr_bytes_new(SCR_BYTES_U8, (double)clen);
+  unsigned char tag[16];
+  scr_aes256gcm_run(key->data, iv->data, sealed->data, clen, out->data, sealed->data, tag);
+  unsigned char acc = 0;
+  for (int j = 0; j < 16; j++) acc |= (unsigned char)(tag[j] ^ sealed->data[clen + j]);
+  if (acc != 0) {
+    scr_bytes_release(out);
+    static const char msg[] = "Unsupported state or unable to authenticate data";
+    scr_throw_error_msg(SCR_ERR_ERROR, msg, sizeof msg - 1);
+    return NULL;
+  }
+  return out;
+}
+
 /* The composed `new crypto.X509Certificate(data).fingerprint` read, fused
  * by the compiler (no certificate handle exists). Node's .fingerprint IS
  * the SHA-1 of the certificate's DER bytes, uppercase colon-separated —

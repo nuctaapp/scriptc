@@ -726,6 +726,14 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "crypto.randomBytes": { argTypes: [F64], result: BYTES_U8 },
   "crypto.hashDigestStr": { argTypes: [STRING, STRING, STRING], result: STRING },
   "crypto.hashDigestBytes": { argTypes: [STRING, BYTES_U8, STRING], result: STRING },
+  "crypto.hashDigestStrRaw": { argTypes: [STRING, STRING], result: BYTES_U8 },
+  "crypto.hashDigestBytesRaw": { argTypes: [STRING, BYTES_U8], result: BYTES_U8 },
+  "crypto.hmacDigestStrKey": { argTypes: [STRING, STRING, STRING, STRING], result: STRING },
+  "crypto.hmacDigestBytesKey": { argTypes: [STRING, BYTES_U8, STRING, STRING], result: STRING },
+  "crypto.timingSafeEqual": { argTypes: [BYTES_U8, BYTES_U8], result: BOOL },
+  "crypto.scryptSync": { argTypes: [STRING, STRING, F64], result: BYTES_U8 },
+  "crypto.aesGcmSeal": { argTypes: [BYTES_U8, BYTES_U8, STRING], result: BYTES_U8 },
+  "crypto.aesGcmOpen": { argTypes: [BYTES_U8, BYTES_U8, BYTES_U8], result: BYTES_U8 },
   // The Buffer statics and the fs/zlib Buffer forms: fixed always-u8
   // signatures (Buffer IS a Uint8Array — one bytes kind).
   "buffer.fromStr": { argTypes: [STRING, STRING], result: BYTES_U8 },

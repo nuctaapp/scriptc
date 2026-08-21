@@ -2980,6 +2980,30 @@ export type IrLibFn =
    * Buffer/typed array's bytes. Pure; never throw. */
   | "crypto.hashDigestStr"
   | "crypto.hashDigestBytes"
+  /** The bare-Buffer digest — .digest() with no encoding (a fresh u8
+   * Buffer, +1). Same fused chain, Buffer result. Pure; never throw. */
+  | "crypto.hashDigestStrRaw"
+  | "crypto.hashDigestBytesRaw"
+  /** The COMPOSED HMAC chain createHmac(alg, key).update(data).digest(enc)
+   * fused into one call — StrKey takes a string key (its UTF-8 bytes),
+   * BytesKey a Buffer key; data is a string. Pure; never throw. */
+  | "crypto.hmacDigestStrKey"
+  | "crypto.hmacDigestBytesKey"
+  /** crypto.timingSafeEqual(a, b) — constant-time equality. THROWS Node's
+   * RangeError (ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH) on length mismatch. */
+  | "crypto.timingSafeEqual"
+  /** crypto.scryptSync(password, salt, keylen) with Node's DEFAULT cost
+   * parameters (N=16384, r=8, p=1) — the only lowered form (an options
+   * argument fences). Strings only (their UTF-8 bytes). THROWS Node's
+   * RangeError on a non-integer keylen. Result is a fresh Buffer (+1). */
+  | "crypto.scryptSync"
+  /** One-shot AES-256-GCM (the scriptc extension aesGcmSealSync /
+   * aesGcmOpenSync — Node's Cipheriv handle has no static lowering): key
+   * 32 bytes, IV 12, no AAD. seal answers ciphertext || 16-byte tag; open
+   * verifies the trailing tag and THROWS Node's GCM auth-failure Error on
+   * mismatch. Both throw on bad key/IV lengths. */
+  | "crypto.aesGcmSeal"
+  | "crypto.aesGcmOpen"
   /** crypto.randomBytes(n) → a real u8 Buffer (+1). THROWS Node's
    * RangeError on out-of-range sizes, exactly like the composed
    * randomBytesToString (which keeps its one-libCall lowering — the two
@@ -7201,6 +7225,10 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.statSync",
   "crypto.randomBytesToString",
   "crypto.randomBytes",
+  "crypto.timingSafeEqual",
+  "crypto.scryptSync",
+  "crypto.aesGcmSeal",
+  "crypto.aesGcmOpen",
   "buffer.concatLen",
   // The checked-dynamic compare/equals validators: Node's argument
   // ladders throw ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE catchably.

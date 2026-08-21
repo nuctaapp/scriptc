@@ -707,6 +707,16 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     // first and the Buffer never materializes there); this entry covers
     // the bare calls and non-composed uses.
     randomBytes: { fn: "crypto.randomBytes", params: [F64], result: BYTES_U8 },
+    // Node's default cost parameters (N=16384, r=8, p=1) are the lowered
+    // form — string password/salt (their UTF-8 bytes); an options
+    // argument or Buffer inputs fence per site.
+    scryptSync: { fn: "crypto.scryptSync", params: [STRING, STRING, F64], result: BYTES_U8 },
+    timingSafeEqual: { fn: "crypto.timingSafeEqual", params: [BYTES_U8, BYTES_U8], result: BOOL },
+    // The scriptc one-shot AES-256-GCM extension (Node's Cipheriv handle
+    // has no static lowering): seal answers ciphertext || 16-byte tag,
+    // open verifies the trailing tag (throws on auth failure).
+    aesGcmSealSync: { fn: "crypto.aesGcmSeal", params: [BYTES_U8, BYTES_U8, STRING], result: BYTES_U8 },
+    aesGcmOpenSync: { fn: "crypto.aesGcmOpen", params: [BYTES_U8, BYTES_U8, BYTES_U8], result: BYTES_U8 },
   },
   zlib: {
     // Buffer in, Buffer out, Node's default options; string inputs fence

@@ -3942,48 +3942,118 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       : ts.isPropertyAccessExpression(callee)
         ? L.builtinMemberOf(callee)
         : null;
-    if (!bi || bi.module !== "crypto" || bi.member !== "createHash") return null;
+    if (!bi || bi.module !== "crypto" || (bi.member !== "createHash" && bi.member !== "createHmac")) {
+      return null;
+    }
+    const hmac = bi.member === "createHmac";
     const loc = locOf(call);
-    const algT = chCall.arguments.length === 1 ? L.typeOf(chCall.arguments[0]!) : undefined;
+    const algT = chCall.arguments.length >= 1 ? L.typeOf(chCall.arguments[0]!) : undefined;
     if (!algT?.isStringLiteralType() || (algT.value !== "sha256" && algT.value !== "sha1")) {
       L.noLowering(
-        "createHash with this algorithm",
+        `${bi.member} with this algorithm`,
         chCall,
-        'sha256 and sha1 are the lowered algorithms: createHash("sha256") ' +
+        `sha256 and sha1 are the lowered algorithms: ${bi.member}("sha256"${hmac ? ", key" : ""}) ` +
           "(sha1 exists for the RFC 6455 Sec-WebSocket-Accept hash)",
       );
     }
-    if (updateCall.arguments.length !== 1) {
+    if (hmac && chCall.arguments.length !== 2) {
       L.noLowering(
-        `Hash.update with ${updateCall.arguments.length} arguments`,
-        updateCall,
-        "one string or Buffer argument is the lowered update (input encodings have no lowering)",
+        `createHmac with ${chCall.arguments.length} arguments`,
+        chCall,
+        'createHmac(algorithm, key) is the lowered form',
       );
+    }
+    if (updateCall.arguments.length !== 1 && updateCall.arguments.length !== 2) {
+      L.noLowering(
+        `${hmac ? "Hmac" : "Hash"}.update with ${updateCall.arguments.length} arguments`,
+        updateCall,
+        "one string or Buffer argument is the lowered update",
+      );
+    }
+    // update(data, "utf8") tolerates the explicit input encoding (Node's
+    // default spelled out — semantically identical for string data).
+    if (updateCall.arguments.length === 2) {
+      const inEncT = L.typeOf(updateCall.arguments[1]!);
+      if (!inEncT.isStringLiteralType() || inEncT.value !== "utf8") {
+        L.noLowering(
+          `${hmac ? "Hmac" : "Hash"}.update with this input encoding`,
+          updateCall,
+          '"utf8" (Node\'s default) is the only lowered input encoding',
+        );
+      }
     }
     const encT = call.arguments.length === 1 ? L.typeOf(call.arguments[0]!) : undefined;
-    if (!encT?.isStringLiteralType() || (encT.value !== "hex" && encT.value !== "base64")) {
+    // Hash.digest() with NO encoding answers the raw Buffer (the deriveKey
+    // idiom); the Hmac raw form stays fenced (no runtime entry).
+    const rawDigest = !hmac && call.arguments.length === 0;
+    if (!rawDigest && (!encT?.isStringLiteralType() || (encT.value !== "hex" && encT.value !== "base64"))) {
       L.noLowering(
-        "Hash.digest with this encoding",
+        `${hmac ? "Hmac" : "Hash"}.digest with this encoding`,
         call,
-        'hex and base64 are the lowered digests: .digest("hex") (the bare Buffer digest has no lowering)',
+        `hex and base64 are the lowered digests: .digest("hex")${hmac ? "" : " (the bare .digest() Buffer form is lowered too)"}`,
       );
     }
-    // alg and enc are proven literals (fenced above), so lowering them
-    // out of source position observes nothing; the data lowers between
-    // them in its own source order.
+    // alg, key and enc are proven literals or lower in source order; the
+    // data lowers between them in its own source order.
     const alg = L.lowerExprExpecting(chCall.arguments[0]!, STRING);
+    // The HMAC key picks the runtime entry by its static type: a string
+    // keys with its UTF-8 bytes, a Buffer with its raw bytes.
+    let key: IrExpr | null = null;
+    let keyIsBytes = false;
+    if (hmac) {
+      const keyNode = chCall.arguments[1]!;
+      const keyIr = L.mapTypeOf(L.typeOf(keyNode));
+      if (keyIr?.kind === "bytes") {
+        key = L.lowerExpr(keyNode);
+        keyIsBytes = true;
+      } else if (keyIr?.kind === "string") {
+        key = L.lowerExprExpecting(keyNode, STRING);
+      } else {
+        L.noLowering(
+          `createHmac keys of '${keyIr ? L.fmt(keyIr) : L.checker.typeToString(L.typeOf(keyNode))}'`,
+          keyNode,
+          "string and Buffer/Uint8Array keys are the lowered forms",
+        );
+      }
+    }
     // The data picks the runtime entry by its static type, the
     // fileURLToPath convention: strings hash their UTF-8 bytes (Node's
     // default input encoding), Buffers/typed arrays hash their bytes.
     const dataNode = updateCall.arguments[0]!;
     const dataIr = L.mapTypeOf(L.typeOf(dataNode));
+    if (hmac) {
+      // HMAC data is string-only today (the hmacSign idiom); the bytes
+      // form fences until a runtime entry exists.
+      if (dataIr?.kind !== "string") {
+        L.noLowering(
+          `Hmac.update of '${dataIr ? L.fmt(dataIr) : L.checker.typeToString(L.typeOf(dataNode))}' values`,
+          dataNode,
+          "string inputs are the lowered Hmac update form",
+        );
+      }
+      const data = L.lowerExprExpecting(dataNode, STRING);
+      const enc = L.lowerExprExpecting(call.arguments[0]!, STRING);
+      return {
+        kind: "libCall",
+        fn: keyIsBytes ? "crypto.hmacDigestBytesKey" : "crypto.hmacDigestStrKey",
+        args: [alg, key!, data, enc],
+        type: STRING,
+        loc,
+      };
+    }
     if (dataIr?.kind === "bytes") {
       const data = L.lowerExpr(dataNode);
+      if (rawDigest) {
+        return { kind: "libCall", fn: "crypto.hashDigestBytesRaw", args: [alg, data], type: BYTES_U8, loc };
+      }
       const enc = L.lowerExprExpecting(call.arguments[0]!, STRING);
       return { kind: "libCall", fn: "crypto.hashDigestBytes", args: [alg, data, enc], type: STRING, loc };
     }
     if (dataIr?.kind === "string") {
       const data = L.lowerExprExpecting(dataNode, STRING);
+      if (rawDigest) {
+        return { kind: "libCall", fn: "crypto.hashDigestStrRaw", args: [alg, data], type: BYTES_U8, loc };
+      }
       const enc = L.lowerExprExpecting(call.arguments[0]!, STRING);
       return { kind: "libCall", fn: "crypto.hashDigestStr", args: [alg, data, enc], type: STRING, loc };
     }

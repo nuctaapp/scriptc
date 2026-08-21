@@ -2591,6 +2591,29 @@ ScrStr *scr_crypto_random_string(double n, ScrStr *enc); /* +1, or throws */
  * Never throw. */
 ScrStr *scr_crypto_hash_digest_str(ScrStr *alg, ScrStr *data, ScrStr *enc);
 ScrStr *scr_crypto_hash_digest_bytes(ScrStr *alg, ScrBytes *data, ScrStr *enc);
+/* The bare-Buffer digest — .digest() with no encoding (fresh u8, +1). */
+ScrBytes *scr_crypto_hash_digest_str_raw(ScrStr *alg, ScrStr *data);
+ScrBytes *scr_crypto_hash_digest_bytes_raw(ScrStr *alg, ScrBytes *data);
+/* The composed createHmac(alg, key).update(data).digest(enc) chain —
+ * fused like the Hash chain. _ks takes a string key (UTF-8 bytes), _kb a
+ * Buffer key. Borrowed; +1 string. Never throw. */
+ScrStr *scr_crypto_hmac_digest_ks(ScrStr *alg, ScrStr *key, ScrStr *data, ScrStr *enc);
+ScrStr *scr_crypto_hmac_digest_kb(ScrStr *alg, ScrBytes *key, ScrStr *data, ScrStr *enc);
+/* crypto.timingSafeEqual — throws Node's RangeError
+ * (ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH) on byte-length mismatch. */
+bool scr_crypto_timing_safe_equal(ScrBytes *a, ScrBytes *b);
+/* scryptSync(password, salt, keylen) with Node's default cost parameters
+ * (N=16384, r=8, p=1) — the only lowered form. Password and salt are
+ * strings (their UTF-8 bytes, Node's default encoding). Throws Node's
+ * RangeError on a non-integer keylen. Borrowed; +1 Buffer. */
+ScrBytes *scr_crypto_scrypt(ScrStr *password, ScrStr *salt, double keylen);
+/* One-shot AES-256-GCM (the scriptc crypto extension aesGcmSealSync /
+ * aesGcmOpenSync): 32-byte key, 12-byte IV, no AAD. seal answers
+ * ciphertext || 16-byte tag; open verifies the trailing tag in constant
+ * time and throws Node's GCM auth-failure Error on mismatch (also throws
+ * ERR_CRYPTO_INVALID_KEYLEN / ERR_CRYPTO_INVALID_IV on bad lengths). */
+ScrBytes *scr_crypto_aes256gcm_seal(ScrBytes *key, ScrBytes *iv, ScrStr *plain);
+ScrBytes *scr_crypto_aes256gcm_open(ScrBytes *key, ScrBytes *iv, ScrBytes *sealed);
 /* One-shot raw digest/HMAC by algorithm name ("md5" | "sha1" | "sha256")
  * — the island crypto shim's bridge (scr_island.c host hooks). Digest
  * bytes into out (≥32); returns the digest length, 0 for an unknown

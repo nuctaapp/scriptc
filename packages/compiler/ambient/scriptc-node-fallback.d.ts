@@ -1352,10 +1352,36 @@ declare module "crypto" {
    * one fences). sha1 exists for the RFC 6455 Sec-WebSocket-Accept
    * hash. */
   export interface Hash {
-    update(data: string | Uint8Array): Hash;
+    update(data: string | Uint8Array, inputEncoding?: "utf8"): Hash;
     digest(encoding: "hex" | "base64"): string;
+    digest(): Buffer;
   }
   export function createHash(algorithm: string): Hash;
+  /* The lowered Hmac surface is the same COMPOSED chain
+   * createHmac("sha256" | "sha1", key).update(data).digest("hex" |
+   * "base64") — fused into one call, the Hmac handle never materializes.
+   * String keys HMAC with their UTF-8 bytes, Buffer keys with their raw
+   * bytes. */
+  export interface Hmac {
+    update(data: string, inputEncoding?: "utf8"): Hmac;
+    digest(encoding: "hex" | "base64"): string;
+  }
+  export function createHmac(algorithm: string, key: string | Uint8Array): Hmac;
+  /* Node's scryptSync with the DEFAULT cost parameters (N=16384, r=8,
+   * p=1) — the only lowered form (an options argument fences). Password
+   * and salt are strings (their UTF-8 bytes, Node's default). Throws
+   * Node's RangeError on a non-integer keylen. */
+  export function scryptSync(password: string, salt: string, keylen: number): Buffer;
+  /* Constant-time equality; throws Node's RangeError
+   * (ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH) on byte-length mismatch. */
+  export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean;
+  /* scriptc EXTENSION (no Node equivalent — Node's Cipheriv handle has no
+   * static lowering): one-shot AES-256-GCM with a 32-byte key and a
+   * 12-byte IV, no AAD. aesGcmSealSync answers ciphertext || 16-byte tag;
+   * aesGcmOpenSync verifies the trailing tag and throws Node's GCM
+   * auth-failure Error on mismatch. Both throw on bad key/IV lengths. */
+  export function aesGcmSealSync(key: Uint8Array, iv: Uint8Array, plaintext: string): Buffer;
+  export function aesGcmOpenSync(key: Uint8Array, iv: Uint8Array, sealed: Uint8Array): Buffer;
   /* The lowered X509Certificate surface is the data-record slice:
    * fingerprint (the SHA-1 of the DER, uppercase colon-separated) and
    * the validFrom/validTo validity window (Node's ASN1_TIME_print

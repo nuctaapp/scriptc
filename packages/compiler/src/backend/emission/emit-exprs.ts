@@ -5545,6 +5545,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_crypto_hash_digest_str(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "crypto.hashDigestBytes":
             return finish(`scr_crypto_hash_digest_bytes(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "crypto.hashDigestStrRaw":
+            return finish(`scr_crypto_hash_digest_str_raw(${arg(0)}, ${arg(1)})`);
+          case "crypto.hashDigestBytesRaw":
+            return finish(`scr_crypto_hash_digest_bytes_raw(${arg(0)}, ${arg(1)})`);
+          case "crypto.hmacDigestStrKey":
+            return finish(`scr_crypto_hmac_digest_ks(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)})`);
+          case "crypto.hmacDigestBytesKey":
+            return finish(`scr_crypto_hmac_digest_kb(${arg(0)}, ${arg(1)}, ${arg(2)}, ${arg(3)})`);
+          // The throwing crypto forms (may-throw seed set): length ladders
+          // and the GCM auth failure land in the exception cell.
+          case "crypto.timingSafeEqual":
+            return finish(`scr_crypto_timing_safe_equal(${arg(0)}, ${arg(1)})`);
+          case "crypto.scryptSync":
+            return finish(`scr_crypto_scrypt(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "crypto.aesGcmSeal":
+            return finish(`scr_crypto_aes256gcm_seal(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "crypto.aesGcmOpen":
+            return finish(`scr_crypto_aes256gcm_open(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           // The Buffer statics (scr_bytes.c): fromStr decodes Node-
           // leniently (never throws), concat copies its borrowed list.
           case "buffer.fromStr":
