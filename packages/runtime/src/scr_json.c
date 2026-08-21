@@ -1905,6 +1905,17 @@ bool scr_dyn_number_coerce_js(const ScrDyn *d, double *out) {
   }
 }
 
+/* Number(x) over a checked-dynamic value — the libCall face of
+ * scr_dyn_number_coerce_js (the out-param folded into the return). false
+ * from the coercion means a user hook threw or the object produced no
+ * primitive — either way the exception is already pending and the dummy 0
+ * is abandoned by the caller's pending check. Borrows d. */
+double scr_dyn_to_number_js(const ScrDyn *d) {
+  double out = 0.0;
+  if (!scr_dyn_number_coerce_js(d, &out)) return 0.0;
+  return out;
+}
+
 /* The checked-dynamic keyed WRITE (`h.k = v` on a dyn receiver): OBJ sets
  * the member (later writes win, insertion order — JS); undefined/null
  * throws Node's "Cannot set properties of ..."; every other kind throws

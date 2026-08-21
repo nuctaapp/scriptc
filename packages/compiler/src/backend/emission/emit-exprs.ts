@@ -5390,6 +5390,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // +1 string or NULL with the exception pending (user
             // toString/valueOf throws propagate). Borrows the dyn.
             return finish(`scr_dyn_string_coerce_js(${arg(0)})`);
+          case "dyn.toNumber":
+            // ToNumber over the checked-dynamic value; a hook throw leaves
+            // the exception pending and the dummy 0 abandoned. Borrows.
+            return finish(`scr_dyn_to_number_js(${arg(0)})`);
           case "error.nodeThrow":
             // The compiler-resolved Node-parity throw (always throws —
             // the typed dummy is abandoned by the pending check's

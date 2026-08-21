@@ -3397,6 +3397,7 @@ export type IrLibFn =
    * render "null"/"undefined") — the WHATWG USVString conversions
    * (URLSearchParams names/values). Borrowed dyn; +1 string. May-throw. */
   | "dyn.toStringCoerce"
+  | "dyn.toNumber"
   /** A read of a `declare`d const NOTHING defines (the bundler-define
    * pattern — __VERSION__): always throws the catchable ReferenceError
    * Node raises at the access ("<name> is not defined"). args[0] is the
@@ -7125,6 +7126,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "error.nodeThrow",
   // USVString coercion runs user toString/valueOf — throws propagate.
   "dyn.toStringCoerce",
+  "dyn.toNumber",
   "child.kill",
   // The caller's lookup runs synchronously inside the connect call — a
   // throw there propagates like Node's.

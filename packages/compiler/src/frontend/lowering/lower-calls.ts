@@ -3432,6 +3432,13 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       if (arg.type.kind === "string") {
         return { kind: "libCall", fn: "num.fromString", args: [arg], type: F64, loc };
       }
+      // A CHECKED-DYNAMIC argument (`Number(row.count)` over a dyn record
+      // read — the SQL-row idiom): the runtime's full JS ToNumber, object
+      // snapshots included (valueOf/toString protocol; a hook throw
+      // propagates as the pending exception).
+      if (arg.type.kind === "dyn") {
+        return { kind: "libCall", fn: "dyn.toNumber", args: [arg], type: F64, loc };
+      }
       L.noLowering(
         `Number of ${L.fmt(arg.type)} values`,
         argNode,

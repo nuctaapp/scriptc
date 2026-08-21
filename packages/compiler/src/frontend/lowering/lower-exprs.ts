@@ -5367,7 +5367,15 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
             if (conditionalSpreadOf(later.expression)) continue;
             const lt = L.mapTypeOf(L.typeOf(later.expression));
             if (lt?.kind === "record") {
-              for (const lf of L.shapes.get(lt.shapeId)?.fields ?? []) laterNames.add(lf.name);
+              for (const lf of L.shapes.get(lt.shapeId)?.fields ?? []) {
+                // An undefined-armed later field does NOT unconditionally
+                // define the name: absence IS the undefined arm (divergences
+                // 37/56), and JS's spread copies only present keys — this
+                // spread's copy stays live as the absent-case fallback (the
+                // override-ternary below decides at runtime).
+                const armed = lf.type.kind === "union" && L.armTag(lf.type.unionId, UNDEFINED_T) >= 0;
+                if (!armed) laterNames.add(lf.name);
+              }
             }
             continue;
           }
@@ -5412,37 +5420,38 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           // runtime value throws the catchable TypeError, never a silent
           // wrong copy. Runtime-ADDED keys drop — width subtyping in
           // spread clothing, divergence 36's stance.
-          let value: IrExpr;
-          if (obj.type.kind === "dyn") {
-            if (!canDynCheckTo(f.type, (id) => L.shapes.get(id), (id) => L.unions.get(id))) {
-              L.unsupported(
-                "SC1100",
-                prop,
-                `object spread of a checked-dynamic source whose field '${f.name}' ('${L.fmt(f.type)}') cannot validate out of the checked-dynamic tree (copy the fields explicitly)`,
-              );
-            }
-            value = {
-              kind: "dynCheck",
-              value: {
-                kind: "dynKeyGet",
-                key: { kind: "strLit", value: f.name, type: STRING, loc: locOf(prop) },
-                value: obj,
-                type: DYN,
-                loc: locOf(prop),
-              },
-              type: f.type,
-              loc: locOf(prop),
-            };
-          } else {
-            value = {
-              kind: "recordGet",
-              obj,
-              shapeId: srcType.shapeId,
-              field: f.name,
-              type: f.type,
-              loc: locOf(prop),
-            };
+          if (obj.type.kind === "dyn" && !canDynCheckTo(f.type, (id) => L.shapes.get(id), (id) => L.unions.get(id))) {
+            L.unsupported(
+              "SC1100",
+              prop,
+              `object spread of a checked-dynamic source whose field '${f.name}' ('${L.fmt(f.type)}') cannot validate out of the checked-dynamic tree (copy the fields explicitly)`,
+            );
           }
+          // A factory, not one node: the absent-key completion below re-reads
+          // the source (reads are pure — the reemittable fence above).
+          const mkRead = (): IrExpr =>
+            obj.type.kind === "dyn"
+              ? {
+                  kind: "dynCheck",
+                  value: {
+                    kind: "dynKeyGet",
+                    key: { kind: "strLit", value: f.name, type: STRING, loc: locOf(prop) },
+                    value: obj,
+                    type: DYN,
+                    loc: locOf(prop),
+                  },
+                  type: f.type,
+                  loc: locOf(prop),
+                }
+              : {
+                  kind: "recordGet",
+                  obj,
+                  shapeId: srcType.shapeId,
+                  field: f.name,
+                  type: f.type,
+                  loc: locOf(prop),
+                };
+          let value: IrExpr = mkRead();
           // A liftable field widens into the target slot (arm wrap,
           // re-tag, nested reshape) — the same per-field rule the slot
           // coercion applies.
@@ -5455,8 +5464,36 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
             );
           }
           const at = fields.findIndex((x) => x.name === f.name);
-          if (at >= 0) fields[at] = { name: f.name, value };
-          else fields.push({ name: f.name, value });
+          if (at >= 0) {
+            // JS's spread copies only PRESENT keys: an undefined-armed source
+            // field (absence IS the undefined arm — divergences 37/56) must
+            // not overwrite the earlier contributor when absent. Present
+            // takes this spread's (lifted) value; absent keeps the earlier
+            // entry — exactly Node's later-wins over own keys only.
+            const undefTag =
+              f.type.kind === "union" ? L.armTag(f.type.unionId, UNDEFINED_T) : -1;
+            if (undefTag >= 0 && f.type.kind === "union") {
+              value = {
+                kind: "ternary",
+                cond: {
+                  kind: "unionIsTag",
+                  unionId: f.type.unionId,
+                  tag: undefTag,
+                  negated: true,
+                  value: mkRead(),
+                  type: BOOL,
+                  loc: locOf(prop),
+                },
+                then: value,
+                else_: fields[at]!.value,
+                type: targetType,
+                loc: locOf(prop),
+              };
+            }
+            fields[at] = { name: f.name, value };
+          } else {
+            fields.push({ name: f.name, value });
+          }
         }
         continue;
       }
