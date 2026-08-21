@@ -2989,6 +2989,11 @@ export type IrLibFn =
    * BytesKey a Buffer key; data is a string. Pure; never throw. */
   | "crypto.hmacDigestStrKey"
   | "crypto.hmacDigestBytesKey"
+  /** The data-bytes forms: update(buffer) hashes the buffer's raw bytes
+   * (the HOTP/TOTP counter idiom — 8 big-endian bytes with NULs that a
+   * string round-trip would re-encode). Same fused chain, both key kinds. */
+  | "crypto.hmacDigestStrKeyBytesData"
+  | "crypto.hmacDigestBytesKeyBytesData"
   /** crypto.timingSafeEqual(a, b) — constant-time equality. THROWS Node's
    * RangeError (ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH) on length mismatch. */
   | "crypto.timingSafeEqual"

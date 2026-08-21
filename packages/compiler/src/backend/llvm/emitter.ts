@@ -468,6 +468,8 @@ const LIB_FN_SYMS: Record<string, string> = {
   "crypto.hashDigestBytesRaw": "scr_crypto_hash_digest_bytes_raw",
   "crypto.hmacDigestStrKey": "scr_crypto_hmac_digest_ks",
   "crypto.hmacDigestBytesKey": "scr_crypto_hmac_digest_kb",
+  "crypto.hmacDigestStrKeyBytesData": "scr_crypto_hmac_digest_ks_db",
+  "crypto.hmacDigestBytesKeyBytesData": "scr_crypto_hmac_digest_kb_db",
   "crypto.timingSafeEqual": "scr_crypto_timing_safe_equal",
   "crypto.scryptSync": "scr_crypto_scrypt",
   "crypto.aesGcmSeal": "scr_crypto_aes256gcm_seal",

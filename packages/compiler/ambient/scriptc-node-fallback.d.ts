@@ -1361,9 +1361,10 @@ declare module "crypto" {
    * createHmac("sha256" | "sha1", key).update(data).digest("hex" |
    * "base64") — fused into one call, the Hmac handle never materializes.
    * String keys HMAC with their UTF-8 bytes, Buffer keys with their raw
-   * bytes. */
+   * bytes; string data HMACs its UTF-8 bytes, Buffer data its raw bytes
+   * (the HOTP/TOTP counter idiom). */
   export interface Hmac {
-    update(data: string, inputEncoding?: "utf8"): Hmac;
+    update(data: string | Uint8Array, inputEncoding?: "utf8"): Hmac;
     digest(encoding: "hex" | "base64"): string;
   }
   export function createHmac(algorithm: string, key: string | Uint8Array): Hmac;

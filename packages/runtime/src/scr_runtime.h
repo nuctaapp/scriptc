@@ -2599,6 +2599,8 @@ ScrBytes *scr_crypto_hash_digest_bytes_raw(ScrStr *alg, ScrBytes *data);
  * Buffer key. Borrowed; +1 string. Never throw. */
 ScrStr *scr_crypto_hmac_digest_ks(ScrStr *alg, ScrStr *key, ScrStr *data, ScrStr *enc);
 ScrStr *scr_crypto_hmac_digest_kb(ScrStr *alg, ScrBytes *key, ScrStr *data, ScrStr *enc);
+ScrStr *scr_crypto_hmac_digest_ks_db(ScrStr *alg, ScrStr *key, ScrBytes *data, ScrStr *enc);
+ScrStr *scr_crypto_hmac_digest_kb_db(ScrStr *alg, ScrBytes *key, ScrBytes *data, ScrStr *enc);
 /* crypto.timingSafeEqual — throws Node's RangeError
  * (ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH) on byte-length mismatch. */
 bool scr_crypto_timing_safe_equal(ScrBytes *a, ScrBytes *b);

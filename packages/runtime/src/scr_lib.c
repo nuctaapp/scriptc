@@ -3773,6 +3773,19 @@ ScrStr *scr_crypto_hmac_digest_kb(ScrStr *alg, ScrBytes *key, ScrStr *data, ScrS
                              (const unsigned char *)data->data, data->len, enc);
 }
 
+/* The data-bytes forms: update(buffer) hashes the buffer's raw bytes (the
+ * HOTP/TOTP counter idiom — 8 big-endian bytes that contain NULs, which a
+ * string round-trip would re-encode). Same fused chain, both key kinds. */
+ScrStr *scr_crypto_hmac_digest_ks_db(ScrStr *alg, ScrStr *key, ScrBytes *data, ScrStr *enc) {
+  return scr_hmac_digest_enc(alg, (const unsigned char *)key->data, key->len,
+                             data->data, data->len * scr_bytes_elem_size(data->elem), enc);
+}
+
+ScrStr *scr_crypto_hmac_digest_kb_db(ScrStr *alg, ScrBytes *key, ScrBytes *data, ScrStr *enc) {
+  return scr_hmac_digest_enc(alg, key->data, key->len * scr_bytes_elem_size(key->elem),
+                             data->data, data->len * scr_bytes_elem_size(data->elem), enc);
+}
+
 /* crypto.timingSafeEqual(a, b) — constant-time comparison. Node throws
  * RangeError (ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH) on length mismatch. */
 bool scr_crypto_timing_safe_equal(ScrBytes *a, ScrBytes *b) {

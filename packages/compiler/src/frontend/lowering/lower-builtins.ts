@@ -4022,13 +4022,25 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     const dataNode = updateCall.arguments[0]!;
     const dataIr = L.mapTypeOf(L.typeOf(dataNode));
     if (hmac) {
-      // HMAC data is string-only today (the hmacSign idiom); the bytes
-      // form fences until a runtime entry exists.
+      // HMAC data: string (UTF-8 bytes, the hmacSign idiom) or a
+      // Buffer/typed array (raw bytes — the HOTP/TOTP counter idiom,
+      // whose 8 big-endian bytes contain NULs a string re-encodes).
+      if (dataIr?.kind === "bytes") {
+        const data = L.lowerExpr(dataNode);
+        const enc = L.lowerExprExpecting(call.arguments[0]!, STRING);
+        return {
+          kind: "libCall",
+          fn: keyIsBytes ? "crypto.hmacDigestBytesKeyBytesData" : "crypto.hmacDigestStrKeyBytesData",
+          args: [alg, key!, data, enc],
+          type: STRING,
+          loc,
+        };
+      }
       if (dataIr?.kind !== "string") {
         L.noLowering(
           `Hmac.update of '${dataIr ? L.fmt(dataIr) : L.checker.typeToString(L.typeOf(dataNode))}' values`,
           dataNode,
-          "string inputs are the lowered Hmac update form",
+          "string and Buffer/Uint8Array inputs are the lowered Hmac update forms",
         );
       }
       const data = L.lowerExprExpecting(dataNode, STRING);

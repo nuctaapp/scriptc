@@ -730,6 +730,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "crypto.hashDigestBytesRaw": { argTypes: [STRING, BYTES_U8], result: BYTES_U8 },
   "crypto.hmacDigestStrKey": { argTypes: [STRING, STRING, STRING, STRING], result: STRING },
   "crypto.hmacDigestBytesKey": { argTypes: [STRING, BYTES_U8, STRING, STRING], result: STRING },
+  "crypto.hmacDigestStrKeyBytesData": { argTypes: [STRING, STRING, BYTES_U8, STRING], result: STRING },
+  "crypto.hmacDigestBytesKeyBytesData": { argTypes: [STRING, BYTES_U8, BYTES_U8, STRING], result: STRING },
   "crypto.timingSafeEqual": { argTypes: [BYTES_U8, BYTES_U8], result: BOOL },
   "crypto.scryptSync": { argTypes: [STRING, STRING, F64], result: BYTES_U8 },
   "crypto.aesGcmSeal": { argTypes: [BYTES_U8, BYTES_U8, STRING], result: BYTES_U8 },
