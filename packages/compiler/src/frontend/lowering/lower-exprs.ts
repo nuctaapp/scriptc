@@ -6421,6 +6421,17 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // The receiver lowers FIRST (both branches below read it, and JS
     // evaluates the receiver before the key).
     const obj = L.lowerExpr(expr.expression);
+    // The value lowered under ANOTHER shape (an erased record cast —
+    // `(next as { k?: unknown })["k"]` over a `Record<string, unknown>`):
+    // the cast does not exist at runtime, so the VALUE's shape rules the
+    // read — same reconciliation as the dot spelling (runtimeShapeTarget).
+    if (obj.type.kind === "record" && obj.type.shapeId !== shapeId) {
+      const realShape = L.shapes.get(obj.type.shapeId);
+      if (realShape && !realShape.tuple) {
+        shapeId = obj.type.shapeId;
+        shape = realShape;
+      }
+    }
     // A record-mapped CHECKER type over a VALUE living in the checked-dynamic tree (a JS
     // file-scope object-literal global): the checked-dynamic keyed read —
     // dynKeyGet against the runtime keys (a missing key answers the checked-dynamic tree
@@ -6819,6 +6830,17 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
             );
           }
           return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc }, loc };
+        }
+        // The value lowered under ANOTHER shape (an erased record cast):
+        // the write paths below would pair the checker's shape with a
+        // receiver of the value's shape — reject with the honest fix
+        // instead of the validator's ICE.
+        if (obj.type.kind === "record" && obj.type.shapeId !== receiverIr.shapeId) {
+          L.unsupported(
+            "SC1090",
+            target,
+            "keyed writes through an erased record cast (the cast does not exist at runtime — drop it and write through the receiver's own type)",
+          );
         }
       }
       if (shape?.tuple) {
@@ -10333,6 +10355,27 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
    * known class instance OR a record, and the member is a field or (class
    * receivers) a declared accessor property. Returns the pieces of a
    * fieldSet/recordSet/accessor-call (minus value/kind) or null. */
+  /** The runtime answer when a record-to-record cast ERASED and the
+   * lowered receiver carries a DIFFERENT shape than the checker spelled
+   * (`(next as { k?: unknown }).k` over a `Record<string, unknown>` — the
+   * erasure keeps the value's own shape): the cast does not exist at
+   * runtime, so the VALUE's shape rules the access — its declared field
+   * reads/writes directly, its index signature serves undeclared names
+   * through the overflow, and a shape with neither declines to the
+   * fallbacks. Routing by the checker's shape here would pair a recordGet
+   * with a receiver of another shape — the validator's ICE. */
+  function runtimeShapeTarget(L: Lowerer, obj: IrExpr, field: string): FieldTarget | null {
+    if (obj.type.kind !== "record") return null;
+    const shape = L.shapes.get(obj.type.shapeId);
+    if (!shape || shape.tuple) return null;
+    const f = shape.fields.find((x) => x.name === field);
+    if (f) return { container: "record", obj, shapeId: obj.type.shapeId, field, fieldType: f.type };
+    if (shape.indexValue) {
+      return { container: "recordOvf", obj, shapeId: obj.type.shapeId, field, fieldType: shape.indexValue };
+    }
+    return null;
+  }
+
   export function fieldTarget(L: Lowerer, access: ts.PropertyAccessExpression): FieldTarget | null {
     if (L.chainBlocked(access)) return null;
     const receiverIr = L.mapTypeOf(L.typeOf(access.expression));
@@ -10375,6 +10418,9 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         // all-unknown-fields cast — `(err as { code?: unknown }).code`):
         // decline, and the dyn keyed-read fallback answers.
         if (obj.type.kind !== "record") return null;
+        // The value lowered under ANOTHER shape (an erased record cast):
+        // the runtime shape rules the access.
+        if (obj.type.shapeId !== receiverIr.shapeId) return runtimeShapeTarget(L, obj, access.name.text);
         return { container: "record", obj, shapeId: receiverIr.shapeId, field: access.name.text, fieldType };
       }
       // A RECORD accessor property: either slot present makes the name an
@@ -10387,6 +10433,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         if (getSlot?.kind === "func" || setSlot?.kind === "func") {
           const obj = L.lowerExpr(access.expression);
           if (obj.type.kind !== "record") return null; // dyn-valued receiver: the keyed fallback answers
+          if (obj.type.shapeId !== receiverIr.shapeId) return runtimeShapeTarget(L, obj, access.name.text);
           const getType = getSlot?.kind === "func" ? getSlot : undefined;
           const setType = setSlot?.kind === "func" ? setSlot : undefined;
           return {
@@ -10434,6 +10481,9 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         };
         if (!nameSym || nameSym.name === ts.InternalSymbolName.Index || canonicalized()) {
           const obj = L.lowerExpr(access.expression);
+          if (obj.type.kind === "record" && obj.type.shapeId !== receiverIr.shapeId) {
+            return runtimeShapeTarget(L, obj, access.name.text);
+          }
           return { container: "recordOvf", obj, shapeId: receiverIr.shapeId, field: access.name.text, fieldType: shape.indexValue };
         }
       }

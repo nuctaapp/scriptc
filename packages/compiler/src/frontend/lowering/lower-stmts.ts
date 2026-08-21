@@ -5,7 +5,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerForOfGenerator, lowerYieldStarStatement } from "./lower-generators.js";
-import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrGlobal, IrJsOp, IrLocal, IrStmt, IrType, JSVAL, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
+import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrGlobal, IrJsOp, IrLocal, IrStmt, IrType, JSVAL, NULL_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import { PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, neverTaintedJsType, stmtUsesIsland, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { cjsExportAssignmentOf, cjsExportDiscardReason, cjsExportTargetLiteral, isCjsJsFile, isJsSourceFile, locOf, requireSpecOf } from "../program.js";
@@ -687,6 +687,8 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
       return { kind: "if", cond, then, else_, loc: locOf(stmt) };
     }
     if (ts.isWhileStatement(stmt)) {
+      const execLoop = lowerWhileExecLoop(L, stmt);
+      if (execLoop) return execLoop;
       const labels = L.takeLabels();
       const cond = L.lowerCondition(stmt.expression);
       const body = L.inCtl("loop", () =>
@@ -6586,6 +6588,209 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       return src;
     }
     return null;
+  }
+
+/** `while ((m = re.exec(s)) !== null) BODY` — the every-match cursor loop
+   * on a /g regex (`let m; while ((m = rx.exec(sql)) !== null) { m[1]... }`,
+   * the classic tokenizer walk). scriptc regexes carry no mutable
+   * lastIndex, so a literal exec cannot iterate — but the PATTERN pins the
+   * intent exactly: visit every match once, in order, leaving the binding
+   * null when the scan ends. It lowers to the matchAll drain (the same
+   * eager matchAllInto + companion-index machinery as the for-of), each
+   * iteration assigning the current row into the OUTER binding through its
+   * declared `RegExpExecArray | null` union, and a final null assignment
+   * after the loop — exec's own exhausted answer, observable past the
+   * loop exactly as in Node. `m.index` reads the companion entry (the
+   * for-of rule) unless the body reassigns `m` (which would decouple the
+   * row from its index — those bodies keep the .index fence). Divergences
+   * shared with matchAll: nonparticipating captures answer "" (exec's
+   * undefined has no slot in the honest string[] row), and a NON-global
+   * regex reaching the drain throws matchAll's TypeError where Node's
+   * exec would loop forever on the first match — a broken program either
+   * way. Literal non-g/y receivers keep the ordinary path (exec = match,
+   * and the enclosing while is the caller's own business).
+   *
+   *   { const %midxs: number[] = []; const %mrows = matchAllInto(s, re, %midxs);
+   *     let %miter = 0;
+   *     while (%miter < %mrows.length) {
+   *       m = wrap(%mrows[%miter]); const %mcur = %miter; %miter += 1; <body> }
+   *     m = null; }
+   */
+  function lowerWhileExecLoop(L: Lowerer, stmt: ts.WhileStatement): IrStmt | null {
+    // Shape of the condition: `(m = re.exec(s)) !== null` / `!= null`, or
+    // the bare truthy assignment `while ((m = re.exec(s)))`.
+    let cond: ts.Expression = stmt.expression;
+    while (ts.isParenthesizedExpression(cond)) cond = cond.expression;
+    if (
+      ts.isBinaryExpression(cond) &&
+      (cond.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+        cond.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsToken)
+    ) {
+      const rhsIsNull = cond.right.kind === ts.SyntaxKind.NullKeyword;
+      const lhsIsNull = cond.left.kind === ts.SyntaxKind.NullKeyword;
+      if (!rhsIsNull && !lhsIsNull) return null;
+      cond = rhsIsNull ? cond.left : cond.right;
+      while (ts.isParenthesizedExpression(cond)) cond = cond.expression;
+    }
+    if (
+      !ts.isBinaryExpression(cond) ||
+      cond.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+      !ts.isIdentifier(cond.left)
+    ) {
+      return null;
+    }
+    const mIdent = cond.left;
+    let call: ts.Expression = cond.right;
+    while (ts.isParenthesizedExpression(call)) call = call.expression;
+    if (
+      !ts.isCallExpression(call) ||
+      call.questionDotToken !== undefined ||
+      call.arguments.length !== 1 ||
+      !ts.isPropertyAccessExpression(call.expression) ||
+      call.expression.questionDotToken !== undefined ||
+      call.expression.name.text !== "exec" ||
+      !L.isStdlibMember(call.expression) ||
+      L.mapTypeOf(L.typeOf(call.expression.expression))?.kind !== "regex" ||
+      L.mapTypeOf(L.typeOf(call.arguments[0]!))?.kind !== "string"
+    ) {
+      return null;
+    }
+    // A LITERAL receiver without /g or /y: exec answers the first match
+    // forever — the plain exec-as-match path (and its infinite while) is
+    // the program's own meaning; only every-match intent rewrites.
+    {
+      let recv: ts.Expression = call.expression.expression;
+      while (ts.isParenthesizedExpression(recv)) recv = recv.expression;
+      if (ts.isRegularExpressionLiteral(recv)) {
+        const flags = recv.text.slice(recv.text.lastIndexOf("/") + 1);
+        if (!flags.includes("g") && !flags.includes("y")) return null;
+      }
+    }
+    // The binding must be a mutable local whose IR type is the exec union
+    // (string[] arm + null arm) — anything else keeps the ordinary path.
+    const mLocal = L.resolveLocal(mIdent);
+    if (!mLocal || !mLocal.mutable || mLocal.type.kind !== "union") return null;
+    const mUnionId = mLocal.type.unionId;
+    const arms = L.unions.get(mUnionId)?.arms;
+    const rowT = arrayOf(STRING);
+    if (!arms || !arms.some((a) => typeEquals(a, rowT)) || L.armTag(mUnionId, NULL_T) < 0) {
+      return null;
+    }
+    const mSym = L.checker.getSymbolAtLocation(mIdent);
+    const loc = locOf(stmt);
+    const labels = L.takeLabels();
+    const rowsT = arrayOf(rowT);
+    const idxsT = arrayOf(F64);
+    // The drain lowers in the ENCLOSING scope (subject and regex belong
+    // there), exactly the for-of matchAll rule.
+    const receiver = L.lowerExprExpecting(call.arguments[0]!, STRING);
+    const re = L.lowerExpr(call.expression.expression);
+    const idxs = L.declareHiddenLocal("%midxs", idxsT);
+    const rows = L.declareHiddenLocal("%mrows", rowsT);
+    const i = L.declareHiddenLocal("%miter", F64);
+    i.mutable = true;
+    const iRef = (): IrExpr => ({ kind: "varRef", localId: i.id, type: F64, loc });
+    const rowsRef = (): IrExpr => ({ kind: "varRef", localId: rows.id, type: rowsT, loc });
+    L.scopes.push(new Map());
+    try {
+      const cur = L.declareHiddenLocal("%mcur", F64);
+      const head: IrStmt[] = [
+        {
+          kind: "assign",
+          localId: mLocal.id,
+          value: L.coerceInto(
+            stmt.expression,
+            { kind: "arrayGet", arr: rowsRef(), index: iRef(), type: rowT, loc },
+            mLocal.type,
+          ),
+          loc,
+        },
+        { kind: "varDecl", localId: cur.id, init: iRef(), loc },
+        {
+          kind: "assign",
+          localId: i.id,
+          value: { kind: "bin", op: "+", left: iRef(), right: { kind: "numLit", value: 1, type: F64, loc }, type: F64, loc },
+          loc,
+        },
+      ];
+      // `m.index` rides the companion array while the body lowers — unless
+      // the body itself reassigns `m` (the decoupling the for-of's
+      // const-only rule guards against; such reads keep their fence).
+      const bodyReassignsM = ((): boolean => {
+        if (!mSym) return true;
+        let found = false;
+        const walk = (n: ts.Node): void => {
+          if (found) return;
+          if (
+            ts.isBinaryExpression(n) &&
+            n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            n.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+            ts.isIdentifier(n.left) &&
+            L.checker.getSymbolAtLocation(n.left) === mSym
+          ) {
+            found = true;
+            return;
+          }
+          ts.forEachChild(n, walk);
+        };
+        walk(stmt.statement);
+        return found;
+      })();
+      if (mSym && !bodyReassignsM) {
+        L.matchAllIndexBindings.set(mSym, { idxsLocalId: idxs.id, curLocalId: cur.id });
+      }
+      let body: IrStmt[];
+      try {
+        body = L.inCtl("loop", () => L.lowerScopedBlock(stmt.statement), labels);
+      } finally {
+        if (mSym && !bodyReassignsM) L.matchAllIndexBindings.delete(mSym);
+      }
+      return {
+        kind: "block",
+        body: [
+          { kind: "varDecl", localId: idxs.id, init: { kind: "arrayLit", elems: [], type: idxsT, loc }, loc },
+          {
+            kind: "varDecl",
+            localId: rows.id,
+            init: {
+              kind: "regexIntrinsic",
+              method: "matchAllInto",
+              receiver,
+              args: [re, { kind: "varRef", localId: idxs.id, type: idxsT, loc }],
+              type: rowsT,
+              loc,
+            },
+            loc,
+          },
+          { kind: "varDecl", localId: i.id, init: { kind: "numLit", value: 0, type: F64, loc }, loc },
+          {
+            kind: "while",
+            cond: {
+              kind: "bin",
+              op: "<",
+              left: iRef(),
+              right: { kind: "arrIntrinsic", method: "length", receiver: rowsRef(), args: [], type: F64, loc },
+              type: BOOL,
+              loc,
+            },
+            body: [...head, ...body],
+            ...(labels && { labels }),
+            loc,
+          },
+          // The exhausted answer: exec returned null, and the binding
+          // holds it past the loop — Node's observable state.
+          {
+            kind: "assign",
+            localId: mLocal.id,
+            value: L.coerceInto(stmt.expression, { kind: "unitLit", unit: "null", type: NULL_T, loc }, mLocal.type),
+            loc,
+          },
+        ],
+        loc,
+      };
+    } finally {
+      L.scopes.pop();
+    }
   }
 
 /** `for (const m of s.matchAll(re))` — the companion-index desugar. The
