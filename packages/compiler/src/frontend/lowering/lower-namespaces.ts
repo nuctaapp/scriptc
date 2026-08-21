@@ -555,6 +555,19 @@ export function ambientUndefinedFnSymbolOf(L: Lowerer, ident: ts.Identifier): ts
   const sym = L.resolveValueSymbol(ident);
   if (!sym || !(sym.flags & ts.SymbolFlags.Function)) return null;
   if (L.isStdlibSymbol(sym)) return null;
+  // A configured FFI binding is a NATIVE call target, never an
+  // ambient-undefined name. Without this exclusion every non-direct-call
+  // position — a const initializer (the trap-decl probe), an assignment
+  // RHS, a chain root — claims the name as Node's ReferenceError before
+  // lowerFfiCall ever sees the call, and the binding silently degrades
+  // (`const h = nativeOpen(...)` threw at runtime while
+  // `console.log(nativeOpen(...))` bound fine). When the validation pass
+  // has run, only the validated symbols step aside: a same-named shadow
+  // keeps its ordinary ambient story.
+  if (L.ffiImportsByName.has(ident.text)) {
+    const validated = L.ffiBindingSymbols?.get(ident.text);
+    if (validated === undefined || validated.has(sym)) return null;
+  }
   let sawFn = false;
   for (const d of L.checker.declarationsOf(sym)) {
     if (ts.isInterfaceDeclaration(d) || ts.isTypeAliasDeclaration(d)) continue; // type-world merge partners
