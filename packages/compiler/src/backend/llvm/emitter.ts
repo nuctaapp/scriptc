@@ -14197,6 +14197,22 @@ class LlEmitter {
       B.line(`${t} = call double @llvm.fabs.f64(double ${v.name})`);
       return { name: t, type: e.type };
     }
+    if (e.fn === "math.sqrt" || e.fn === "math.exp" || e.fn === "math.log" || e.fn === "math.log2") {
+      const intr = e.fn.slice("math.".length);
+      const v = this.emitExpr(e.args[0]!);
+      this.declare(`declare double @llvm.${intr}.f64(double)`);
+      const t = B.tmp();
+      B.line(`${t} = call double @llvm.${intr}.f64(double ${v.name})`);
+      return { name: t, type: e.type };
+    }
+    if (e.fn === "math.pow") {
+      const a = this.emitExpr(e.args[0]!);
+      const b = this.emitExpr(e.args[1]!);
+      this.declare(`declare double @llvm.pow.f64(double, double)`);
+      const t = B.tmp();
+      B.line(`${t} = call double @llvm.pow.f64(double ${a.name}, double ${b.name})`);
+      return { name: t, type: e.type };
+    }
     if (e.fn === "num.isNaN") {
       const v = this.emitExpr(e.args[0]!);
       const t = B.tmp();

@@ -3533,6 +3533,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_math_max(${arg(0)}, ${arg(1)})`);
           case "math.random":
             return finish(`scr_math_random()`);
+          // The libm transcendentals + sqrt + pow (math.h): the C calls ARE
+          // the JS operations (pow shares the `**` operator's emission).
+          // Borrow nothing; no throw.
+          case "math.sqrt":
+            return finish(`sqrt(${arg(0)})`);
+          case "math.exp":
+            return finish(`exp(${arg(0)})`);
+          case "math.log":
+            return finish(`log(${arg(0)})`);
+          case "math.log2":
+            return finish(`log2(${arg(0)})`);
+          case "math.pow":
+            return finish(`pow(${arg(0)}, ${arg(1)})`);
           // The static global parsers/tests (scr_string.c). Borrow; no throw.
           case "num.parseInt":
             return finish(`scr_parse_int(${arg(0)}, ${arg(1)})`);

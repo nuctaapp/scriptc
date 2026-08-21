@@ -2049,6 +2049,19 @@ export type IrLibFn =
    * inference needs them compiled, not island-served. Never throw. */
   | "math.trunc"
   | "math.ceil"
+  /** Math.sqrt / Math.exp / Math.log / Math.log2 — libm's C functions on
+   * IEEE doubles (the spec allows implementation-approximated results for
+   * the transcendentals, exactly what every engine ships; sqrt IS exact).
+   * NaN/±Infinity/domain edges follow C99 = ECMA. Never throw. */
+  | "math.sqrt"
+  | "math.exp"
+  | "math.log"
+  | "math.log2"
+  /** `Math.pow(a, b)` — C pow(), the SAME emission the `**` operator
+   * already rides (ES2016 defines both by Number::exponentiate, so parity
+   * with the operator is parity with the spec modulo the pow(1, NaN) C99
+   * corner the operator already accepts). Never throws. */
+  | "math.pow"
   /** The static global parsers/tests (scr_string.c). num.parseInt is
    * ECMA-262 19.2.5 exactly — JS whitespace, sign, ToInt32 radix (the
    * frontend completes an omitted radix to 0 = the spec's "undefined":

@@ -532,6 +532,26 @@ export const STATIC_MATH_FNS: Record<string, { fn: IrLibFn; arity: number } | un
   min: { fn: "math.min", arity: 2 },
   max: { fn: "math.max", arity: 2 },
   random: { fn: "math.random", arity: 0 },
+  // The libm transcendentals + sqrt + pow: one C call IS the JS operation
+  // (pow shares the `**` operator's emission — same spec function).
+  sqrt: { fn: "math.sqrt", arity: 1 },
+  exp: { fn: "math.exp", arity: 1 },
+  log: { fn: "math.log", arity: 1 },
+  log2: { fn: "math.log2", arity: 1 },
+  pow: { fn: "math.pow", arity: 2 },
+};
+
+/** The Math number CONSTANTS, folded to literals at lowering (the values
+ * are the IEEE doubles the spec pins — no island, no --dynamic). */
+export const STATIC_MATH_CONSTS: Record<string, number | undefined> = {
+  PI: Math.PI,
+  E: Math.E,
+  LN2: Math.LN2,
+  LN10: Math.LN10,
+  LOG2E: Math.LOG2E,
+  LOG10E: Math.LOG10E,
+  SQRT2: Math.SQRT2,
+  SQRT1_2: Math.SQRT1_2,
 };
 
 /** Number prototype methods with dedicated STATIC lowering paths. The
