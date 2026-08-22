@@ -634,6 +634,9 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     accessSync: { fn: "fs.accessSync", params: [STRING, F64], result: VOID },
     unlinkSync: { fn: "fs.unlinkSync", params: [STRING], result: VOID },
     chmodSync: { fn: "fs.chmodSync", params: [STRING, F64], result: VOID },
+    // Numeric-seconds form only (Node accepts numbers there); Date args are
+    // a program-side conversion the caller writes explicitly.
+    utimesSync: { fn: "fs.utimesSync", params: [STRING, F64, F64], result: VOID },
     chownSync: { fn: "fs.chownSync", params: [STRING, F64, F64], result: VOID },
     // The 2-argument form only: Node's mode flags (COPYFILE_EXCL, ...)
     // land on the arity fence.

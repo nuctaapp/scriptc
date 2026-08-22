@@ -370,6 +370,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "fs.realpathSync": "scr_fs_realpath",
   "fs.unlinkSync": "scr_fs_unlink",
   "fs.chmodSync": "scr_fs_chmod",
+  "fs.utimesSync": "scr_fs_utimes",
   "fs.copyFileSync": "scr_fs_copyfile",
   "fs.renameSync": "scr_fs_rename",
   "fs.accessSync": "scr_fs_access",

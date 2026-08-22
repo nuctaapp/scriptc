@@ -2215,6 +2215,7 @@ ScrStr *scr_fs_read_fd(double fd);
  * creates). */
 void scr_fs_unlink(ScrStr *path);
 void scr_fs_chmod(ScrStr *path, double mode);
+void scr_fs_utimes(ScrStr *path, double atime_sec, double mtime_sec);
 void scr_fs_chown(ScrStr *path, double uid, double gid);
 void scr_fs_copyfile(ScrStr *src, ScrStr *dest);
 void scr_fs_rename(ScrStr *oldpath, ScrStr *newpath);

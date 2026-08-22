@@ -2399,6 +2399,45 @@ void scr_fs_rename(ScrStr *oldpath, ScrStr *newpath) {
   if (error != 0) scr_fs_rename_error(error, oldpath, newpath);
 }
 
+/* utimesSync(path, atimeSec, mtimeSec): Node's fs.utimesSync with numeric
+ * seconds (fractional accepted). Windows can't ride the CRT _utime: it takes
+ * ACP narrow paths (runtime strings are UTF-8) and whole seconds only —
+ * Node/libuv goes through SetFileTime, so mirror that on the wide API.
+ * Failures spell syscall "utime", Node's shape. */
+#ifdef _WIN32
+void scr_fs_utimes(ScrStr *path, double atime_sec, double mtime_sec) {
+  WCHAR *wide = scr_fs_win_wide(path);
+  if (!wide) scr_fs_throw(scr_fs_win_errno(GetLastError()), "utime", path);
+  HANDLE h = CreateFileW(wide, FILE_WRITE_ATTRIBUTES,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  free(wide);
+  if (h == INVALID_HANDLE_VALUE) {
+    scr_fs_throw(scr_fs_win_errno(GetLastError()), "utime", path);
+  }
+  /* Unix epoch seconds → FILETIME (100ns ticks since 1601-01-01). */
+  const double FT_PER_SEC = 10000000.0;
+  const uint64_t EPOCH_DELTA = 116444736000000000ULL;
+  uint64_t at = (uint64_t)((int64_t)(atime_sec * FT_PER_SEC)) + EPOCH_DELTA;
+  uint64_t mt = (uint64_t)((int64_t)(mtime_sec * FT_PER_SEC)) + EPOCH_DELTA;
+  FILETIME aft = { (DWORD)(at & 0xFFFFFFFFu), (DWORD)(at >> 32) };
+  FILETIME mft = { (DWORD)(mt & 0xFFFFFFFFu), (DWORD)(mt >> 32) };
+  BOOL ok = SetFileTime(h, NULL, &aft, &mft);
+  DWORD err = ok ? 0 : GetLastError();
+  CloseHandle(h);
+  if (!ok) scr_fs_throw(scr_fs_win_errno(err), "utime", path);
+}
+#else
+void scr_fs_utimes(ScrStr *path, double atime_sec, double mtime_sec) {
+  struct timeval tv[2];
+  tv[0].tv_sec = (time_t)atime_sec;
+  tv[0].tv_usec = (suseconds_t)((atime_sec - (double)tv[0].tv_sec) * 1e6);
+  tv[1].tv_sec = (time_t)mtime_sec;
+  tv[1].tv_usec = (suseconds_t)((mtime_sec - (double)tv[1].tv_sec) * 1e6);
+  if (utimes(path->data, tv) != 0) scr_fs_throw(errno, "utime", path);
+}
+#endif
+
 void scr_fs_rm(ScrStr *path) {
   /* Node's rmSync: lstat first (a missing path reports the lstat syscall),
    * refuse directories (Node requires `recursive`, which the scriptc

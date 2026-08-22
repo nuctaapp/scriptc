@@ -4173,6 +4173,7 @@ export type IrLibFn =
    * creates, like Node's). */
   | "fs.unlinkSync"
   | "fs.chmodSync"
+  | "fs.utimesSync"
   | "fs.chownSync"
   | "fs.copyFileSync"
   /** renameSync is the direct two-path syscall wrapper. renameCb defers
@@ -7333,6 +7334,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // The wider sync fs slice: same catchable errno throws as the rest.
   "fs.unlinkSync",
   "fs.chmodSync",
+  "fs.utimesSync",
   "fs.chownSync",
   "fs.copyFileSync",
   "fs.renameSync",
