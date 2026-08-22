@@ -342,6 +342,26 @@ ScrStr *scr_http_req_header(ScrHttpReq *r, ScrStr *name) {
   return NULL;
 }
 
+/* the deferred-emit queue lives below (the proto sweep) — the drain of
+ * buffered body bytes rides it; the parser's deliver and the cork flush
+ * live below their callers too */
+static void scr_http_emit_push(int kind, void *h /*moves +1*/);
+static void scr_http_req_deliver(ScrHttpReq *r, const char *data, size_t n);
+static void scr_http_res_cork_flush(ScrHttpRes *r);
+#define SCR_HTTP_EMIT_REQ_DRAIN_K 6
+
+/* Body bytes that arrive before the first consumer buffer in pend (the
+ * stream starts paused — Node's readable model; nothing may drop). The
+ * first 'data' listener, a pipe, or resume() switches the flow on: queue
+ * the drain that hands the held bytes (and a deferred 'end') over. */
+static void scr_http_req_queue_drain(ScrHttpReq *r) {
+  if (r->paused) return;
+  if ((r->pend_len > 0 || r->end_pending) && !r->drain_queued) {
+    r->drain_queued = true;
+    scr_http_emit_push(SCR_HTTP_EMIT_REQ_DRAIN_K, scr_http_req_retain(r));
+  }
+}
+
 /* req.pipe(dest) — the proxy legs: an IncomingMessage body streams into
  * a ServerResponse, a ClientRequest, or a raw socket (chunk-for-chunk, no
  * backpressure — divergence 54's stream model); the body's natural end
@@ -354,6 +374,7 @@ void scr_http_req_pipe_res(ScrHttpReq *r, ScrHttpRes *dst /*borrowed*/) {
   }
   if (r->pipe_res) scr_http_res_release(r->pipe_res);
   r->pipe_res = scr_http_res_retain(dst);
+  scr_http_req_queue_drain(r);
 }
 
 /* socket.pipe(res) — the extended-CONNECT bridge leg: a native reader on
@@ -402,6 +423,7 @@ void scr_http_req_pipe_client(ScrHttpReq *r, ScrHttpClientReq *dst /*borrowed*/)
   }
   if (r->pipe_client) scr_http_client_release(r->pipe_client);
   r->pipe_client = scr_http_client_retain(dst);
+  scr_http_req_queue_drain(r);
 }
 
 void scr_http_req_pipe_sock(ScrHttpReq *r, ScrNetSocket *dst /*borrowed*/) {
@@ -411,6 +433,7 @@ void scr_http_req_pipe_sock(ScrHttpReq *r, ScrNetSocket *dst /*borrowed*/) {
   }
   if (r->pipe_sock) scr_net_sock_release(r->pipe_sock);
   r->pipe_sock = scr_net_sock_retain(dst);
+  scr_http_req_queue_drain(r);
 }
 
 void scr_http_req_on_data(ScrHttpReq *r, ScrClosure *cb /*moves*/, ScrNetDataFn fn, bool once) {
@@ -419,6 +442,7 @@ void scr_http_req_on_data(ScrHttpReq *r, ScrClosure *cb /*moves*/, ScrNetDataFn 
     return;
   }
   scr_net_ls_add(&r->data_ls, cb, (void *)fn, once);
+  scr_http_req_queue_drain(r);
 }
 
 void scr_http_req_on_end(ScrHttpReq *r, ScrClosure *cb /*moves*/, bool once) {
@@ -437,14 +461,6 @@ ScrNetSocket *scr_http_req_socket(ScrHttpReq *r) {
   return r->sock ? scr_net_sock_retain(r->sock) : NULL;
 }
 
-/* the deferred-emit queue lives below (the proto sweep) — resume()'s
- * drain rides it; the parser's deliver and the cork flush live below
- * their callers too */
-static void scr_http_emit_push(int kind, void *h /*moves +1*/);
-static void scr_http_req_deliver(ScrHttpReq *r, const char *data, size_t n);
-static void scr_http_res_cork_flush(ScrHttpRes *r);
-#define SCR_HTTP_EMIT_REQ_DRAIN_K 6
-
 /* resume(): a flow-control no-op unless pause() held delivery — then the
  * buffered bytes (and a deferred 'end') drain through the emit queue,
  * never the resuming stack. This parser always consumes body bytes
@@ -452,10 +468,7 @@ static void scr_http_res_cork_flush(ScrHttpRes *r);
 void scr_http_req_resume(ScrHttpReq *r) {
   if (!r->paused) return;
   r->paused = false;
-  if ((r->pend_len > 0 || r->end_pending) && !r->drain_queued) {
-    r->drain_queued = true;
-    scr_http_emit_push(SCR_HTTP_EMIT_REQ_DRAIN_K, scr_http_req_retain(r));
-  }
+  scr_http_req_queue_drain(r);
 }
 
 /* pause(): delivery holds until resume() (scr_http_req_deliver buffers;
@@ -522,8 +535,9 @@ void scr_http_req_on_aborted(ScrHttpReq *r, ScrClosure *cb /*moves*/, bool once)
  * req cannot cycle past the body). */
 static void scr_http_req_finish(ScrHttpReq *r, bool fire) {
   if (r->ended) return;
-  if (fire && r->paused) {
-    /* pause() holds 'end' too — resume()'s drain finishes the body */
+  if (fire && (r->paused || r->pend_len > 0 || r->drain_queued)) {
+    /* pause() holds 'end' too — and so do body bytes still waiting for
+     * their first consumer: the drain finishes the body after them */
     r->end_pending = true;
     return;
   }
@@ -1551,9 +1565,12 @@ static void scr_http_conn_bad_request(ScrHttpConn *conn) {
  * feed, and the h2 compat DATA-frame feed). */
 static void scr_http_req_deliver(ScrHttpReq *r, const char *data, size_t n) {
   if (!r || n == 0 || r->ended) return;
-  if (r->paused) {
-    /* req.pause(): the parser keeps consuming (memory is the buffer —
-     * a documented bound), delivery waits for resume()'s drain */
+  bool piped = r->pipe_res != NULL || r->pipe_client != NULL || r->pipe_sock != NULL;
+  if (r->paused || (r->data_ls.n == 0 && !piped)) {
+    /* req.pause(), or no consumer yet (the stream starts paused: bytes
+     * that arrive before the first 'data' listener/pipe wait here — they
+     * never drop): the parser keeps consuming (memory is the buffer — a
+     * documented bound), delivery waits for the drain */
     if (r->pend_len + n > r->pend_cap) {
       size_t cap = r->pend_cap ? r->pend_cap : 4096;
       while (cap < r->pend_len + n) cap *= 2;
@@ -1565,8 +1582,6 @@ static void scr_http_req_deliver(ScrHttpReq *r, const char *data, size_t n) {
     r->pend_len += n;
     return;
   }
-  bool piped = r->pipe_res != NULL || r->pipe_client != NULL || r->pipe_sock != NULL;
-  if (r->data_ls.n == 0 && !piped) return;
   ScrBytes *chunk = scr_bytes_new(SCR_BYTES_U8, (double)n);
   memcpy(chunk->data, data, n);
   if (r->data_ls.n > 0) {
