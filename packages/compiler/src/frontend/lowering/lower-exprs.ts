@@ -4664,8 +4664,24 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     // slot's field types (`lanIp: string | null`), which the literal's own
     // type narrows away (a field written as `lanIp: null` types as bare
     // `null`, which maps to nothing on its own).
-    if (tsType.isUnionType() && tsType.getTypes().some((t) => t.getSymbol()?.name === "PromiseLike")) {
-      tsType = L.checker.getAwaitedType(tsType) ?? tsType;
+    if (tsType.isUnionType()) {
+      const promiseLikeArm = tsType.getTypes().find((t) => t.getSymbol()?.name === "PromiseLike");
+      if (promiseLikeArm !== undefined) {
+        const awaited = L.checker.getAwaitedType(tsType);
+        if (awaited !== undefined) {
+          tsType = awaited;
+        } else {
+          // getAwaitedType DECLINES the contract union when T is itself a
+          // UNION (`Promise<A | B>`'s return context `A | B |
+          // PromiseLike<A | B>`): the awaited context is exactly
+          // PromiseLike's own type argument — recover it from the
+          // reference instead of leaving the unmappable union in place
+          // (which would build the literal at its narrowed own shape and
+          // fail the arm coercion downstream).
+          const args = L.checker.getTypeArguments(promiseLikeArm as ts.TypeReference);
+          if (args.length === 1) tsType = args[0]!;
+        }
+      }
     }
     let mapped = L.mapTypeOf(tsType);
     // An EMPTY-record context under a NON-empty literal (`Object.keys({
