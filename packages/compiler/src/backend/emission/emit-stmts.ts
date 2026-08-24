@@ -599,9 +599,15 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
           // region releases and control runs that region's pending-return
           // finally copy; its tail dispatches further out or returns.
           if (s.value) {
+            // A VOID-typed value (`return await voidFn()` in a void
+            // function) evaluates for its effects only: there is nothing
+            // to park — and no sc_pret slot exists (it is declared only
+            // for non-void returns).
             const v = E.emitExpr(s.value);
-            E.moveTemp(v); // ownership parks in the slot until the dispatch returns it
-            E.line(`sc_pret = ${v.name};${E.srcComment(s.loc)}`);
+            if (v.name !== "") {
+              E.moveTemp(v); // ownership parks in the slot until the dispatch returns it
+              E.line(`sc_pret = ${v.name};${E.srcComment(s.loc)}`);
+            }
           }
           fin.used = true;
           E.releaseForJump(fin.frameDepth, fin.scopeDepth);
@@ -610,6 +616,13 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         }
         if (s.value) {
           const v = E.emitExpr(s.value);
+          if (v.name === "") {
+            // Void value: effects already emitted; a bare return is the
+            // whole statement.
+            E.releaseForJump(0, 0);
+            E.line(`return;${E.srcComment(s.loc)}`);
+            break;
+          }
           E.moveTemp(v);
           // Everything down to function depth releases; the moved result is
           // exempt (already struck from its frame).
