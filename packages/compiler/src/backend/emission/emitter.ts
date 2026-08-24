@@ -56,7 +56,7 @@ import {
 } from "../mangle.js";
 import { cFnPtrCast, cType, releaseCallC, cStringLiteral, cDecl } from "./emit-types.js";
 import { computeMayThrow } from "./may-throw.js";
-import { dynDesc, unionTruthyHelper, unionEqHelper, unionToStrHelper, unionJoinHelper, jsonWriteHelper, jsonIndentHelper, dynMatchHelper, dynCheckHelper, dynFuncBoxHelper, dynToStrHelper, caughtToDynHelper, toDynHelper, recordKeyGetHelper, recordKeySetHelper } from "./emit-walkers.js";
+import { dynDesc, unionTruthyHelper, unionEqHelper, unionToStrHelper, unionJoinHelper, jsonWriteHelper, jsonIndentHelper, dynMatchHelper, dynArmMatchHelper, dynCheckHelper, dynFuncBoxHelper, dynToStrHelper, caughtToDynHelper, toDynHelper, recordKeyGetHelper, recordKeySetHelper } from "./emit-walkers.js";
 import { VtSlot, ClassMeta, emitStructDefs, vtEntriesFor, vtSlotParams, emitVtableDecls, emitVtableInstances, emitVtAdapterDefs, emitHierarchyClassHelpers, emitClassObjs, emitCtorThunkDefs, errorVtStampLines, emitterVtStampLines, streamVtStampLines, traceAdapterC, traceArgC, boxNewC, arrNewC } from "./emit-shapes.js";
 import { emitAsyncScaffolding, childDataThunkFor, childExitThunkFor, childExitThunkFor2, closeBindThunkFor, connectResThunkFor, connectSockThunkFor, closeOverrideWrapFor, dgramMsgThunkFor, dnsLookupThunkFor, fsRenameThunkFor, netLookupAnswerThunkFor, emitterInvokeThunkFor, streamCbThunkFor, streamDataThunkFor, raceAdapterFor, resolveThunkFor, sniAnswerThunkFor } from "./emit-async.js";
 import { emitNpmEmbedding, islandAdapter, islandTypedAdapter } from "./emit-island.js";
@@ -289,6 +289,12 @@ export class CEmitter {
   readonly unionToStrFns = new Map<string, string>();
   readonly unionJoinFns = new Map<string, string>();
   readonly dynMatchers = new Map<string, string>();
+  /** Literal-discriminant arm matchers (sc_dmA_*): typeKey + lit pairs →
+   * emitted name. A union ARM whose record type carried literal field
+   * values in the source (IrUnionDef.armLits) matches only when those
+   * values are present — the generic structural matcher alone would let
+   * the first shape-compatible arm win and mis-tag the payload. */
+  readonly dynArmMatchers = new Map<string, string>();
   readonly dynBuilders = new Map<string, string>();
   /** Static→dyn converters (sc_td_*), per typeKey; dynamic-keyed record
    * read helpers (sc_rkg_*), per shapeId|result typeKey; dynamic-keyed
@@ -1379,6 +1385,10 @@ export class CEmitter {
 
   dynMatchHelper(t: IrType): string {
     return dynMatchHelper(this, t);
+  }
+
+  dynArmMatchHelper(t: IrType, lits: Record<string, string | number | boolean> | null | undefined): string {
+    return dynArmMatchHelper(this, t, lits);
   }
 
   dynCheckHelper(t: IrType): string {

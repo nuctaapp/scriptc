@@ -1233,6 +1233,20 @@ export interface IrUnionDef {
    * an arm's index here is its runtime tag. Never void/func/union; the
    * unit kinds (undefinedT/nullT) are payload-less arms. */
   arms: IrType[];
+  /** Per-arm LITERAL discriminants, parallel to `arms` (null/absent = no
+   * constraint). Record arms lose their field literal types to mapType's
+   * widening (`kind: 'a'` maps as plain string), so a dyn value matching
+   * a union of records could otherwise pick the WRONG arm — the first
+   * structurally-compatible one — and every later field read would go
+   * through the wrong layout. The frontend captures each record arm's
+   * literal-typed properties here (name → exact value), and the dyn
+   * match/check walkers test the VALUES before the structural match.
+   * Interning reconciles conservatively: when two source unions land on
+   * the same def, only pairs both agree on survive (a source with no
+   * literals clears them) — the check can only be as strict as EVERY
+   * source guarantees, so degrading to the unconstrained match is always
+   * sound. */
+  armLits?: (Record<string, string | number | boolean> | null)[];
 }
 
 export interface IrFunction {

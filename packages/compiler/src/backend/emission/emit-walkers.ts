@@ -7,7 +7,7 @@
  * CEmitter and these functions only consult them through it. */
 import type { CEmitter } from "./emitter.js";
 import { DYN_HANDLE_KINDS, IrType, isRefCounted, typeEquals, typeKey, unionArmsEmbedIdentically } from "../../ir/nodes.js";
-import { cDecl, cStringLiteral, cType, elemAccess, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
+import { cDecl, cNumberLiteral, cStringLiteral, cType, elemAccess, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleField, mangleRecordNew, mangleRecordStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 
@@ -866,14 +866,74 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         // undefined (a MISSING record key was the arm's only source), but
         // the checked-dynamic tree can hold the undefined value now — overflow entries
         // under `unknown` index signatures — and it matches exactly the
-        // undefined arm.
-        const arms = def.arms.map((a) => `${E.dynMatchHelper(a)}(d)`);
+        // undefined arm. Arms carrying literal discriminants (armLits) use
+        // the value-testing matcher so the union answers true only for the
+        // arm the values actually name.
+        const arms = def.arms.map((a, i) => `${E.dynArmMatchHelper(a, def.armLits?.[i])}(d)`);
         d.push(`  return ${arms.join(" || ")};`);
         break;
       }
       default:
         throw new Error(`emitter bug: dynMatch of non-JSON type ${t.kind}`);
     }
+    d.push(`}`, ``);
+    E.walkerDefs.push(...d);
+    return name;
+  }
+
+/** The literal-aware matcher for one union ARM carrying literal
+   * discriminants (IrUnionDef.armLits): `static bool sc_dmA_<n>(const
+   * ScrDyn *d)` — the arm's literal field VALUES must be present before
+   * the generic structural matcher gets a say. mapType widens a record
+   * field's literal type away (`kind: 'a'` → string), so the arms of a
+   * discriminated union are often structurally identical; without the
+   * value test the first shape-compatible arm always wins and the payload
+   * mis-tags. A lit-less arm answers the generic matcher unchanged. */
+  export function dynArmMatchHelper(
+    E: CEmitter,
+    t: IrType,
+    lits: Record<string, string | number | boolean> | null | undefined,
+  ): string {
+    const entries = lits ? Object.entries(lits).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)) : [];
+    if (entries.length === 0) return dynMatchHelper(E, t);
+    const key = `${typeKey(t)}|${JSON.stringify(entries)}`;
+    const existing = E.dynArmMatchers.get(key);
+    if (existing) return existing;
+    const name = `sc_dmA_${E.dynArmMatchers.size}`;
+    E.dynArmMatchers.set(key, name);
+    const generic = dynMatchHelper(E, t);
+    // "*/" inside a source-level literal value would close the trailing comment.
+    const safe = key.split("*/").join("* /");
+    const sig = `static bool ${name}(const ScrDyn *d)`;
+    E.walkerProtos.push(`${sig}; /* arm ${safe} */`);
+    const d: string[] = [`${sig} { /* arm ${safe} */`];
+    // A typed capsule materializes and re-answers: its static type is the
+    // WIDENED record — it cannot vouch for the literal values, so the
+    // typed_ref_is fast path of the generic matcher must not answer here.
+    d.push(
+      `  if (d && d->kind == SCR_DYN_TYPED_REF) {`,
+      `    ScrDyn *sc_materialized = scr_dyn_typed_ref_materialize(d);`,
+      `    bool sc_out = ${name}(sc_materialized);`,
+      `    scr_dyn_release(sc_materialized);`,
+      `    return sc_out;`,
+      `  }`,
+    );
+    d.push(`  if (d->kind != SCR_DYN_OBJ) return false;`);
+    d.push(`  const ScrDyn *m;`);
+    for (const [fname, v] of entries) {
+      const keyLit = cStringLiteral(Buffer.from(fname, "utf8"));
+      const keyLen = Buffer.byteLength(fname, "utf8");
+      d.push(`  m = scr_dyn_obj_get(d, ${keyLit}, ${keyLen});`);
+      if (typeof v === "string") {
+        const litSym = E.internLiteral(v);
+        d.push(`  if (!m || m->kind != SCR_DYN_STR || !scr_str_eq(m->v.str, (ScrStr *)&${litSym})) return false;`);
+      } else if (typeof v === "number") {
+        d.push(`  if (!m || m->kind != SCR_DYN_NUM || m->v.num != ${cNumberLiteral(v)}) return false;`);
+      } else {
+        d.push(`  if (!m || m->kind != SCR_DYN_BOOL || m->v.b != ${v ? "true" : "false"}) return false;`);
+      }
+    }
+    d.push(`  return ${generic}(d);`);
     d.push(`}`, ``);
     E.walkerDefs.push(...d);
     return name;
@@ -1361,11 +1421,13 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       case "union": {
         const def = E.unionsById.get(t.unionId);
         if (!def) throw new Error(`emitter bug: dynCheck of unknown union ${t.unionId}`);
-        // Arms in CANONICAL order, first FULL match wins (discriminated
-        // unions disambiguate naturally: the arm whose declared fields all
-        // fit). The matched arm's builder can no longer fail.
+        // Arms in CANONICAL order, first FULL match wins. Discriminated
+        // unions disambiguate by their literal VALUES (armLits — the
+        // widened shapes alone are often identical); the value-testing
+        // matcher keeps this check aligned with the union match above.
+        // The matched arm's builder can no longer fail.
         def.arms.forEach((arm, i) => {
-          const m = E.dynMatchHelper(arm);
+          const m = E.dynArmMatchHelper(arm, def.armLits?.[i]);
           if (arm.kind === "undefinedT") {
             // Parsed JSON never matches here (no undefined in JSON text —
             // a MISSING record key builds this arm in the record builder

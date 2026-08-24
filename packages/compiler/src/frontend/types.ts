@@ -363,30 +363,37 @@ export class UnionRegistry {
 
   /** Completes a recursive placeholder with its canonical arm list and
    * registers the structural key (first writer wins, like shapes). */
-  finalizeRecursive(t: ts.Type, arms: IrType[]): string {
+  finalizeRecursive(t: ts.Type, arms: IrType[], armLits?: (Record<string, string | number | boolean> | null)[]): string {
     const id = this.recIds.get(t);
     if (id === undefined) throw new Error("union registry bug: finalizeRecursive without a placeholder");
     if (this.pendingRec.has(id)) {
       const def = this.byId.get(id)!;
       def.arms.push(...arms);
+      attachArmLits(def, armLits);
       this.pendingRec.delete(id);
       const key = JSON.stringify(arms.map(typeKey));
       if (!this.byKey.has(key)) this.byKey.set(key, id);
+    } else {
+      reconcileArmLits(this.byId.get(id)!, armLits);
     }
     return id;
   }
 
   /** Interns a canonical (typeKey-sorted, deduplicated) arm list, returning
-   * its unionId. */
-  intern(arms: IrType[]): string {
+   * its unionId. `armLits` (parallel to arms) carries each record arm's
+   * literal discriminants; on a def hit they RECONCILE (see IrUnionDef). */
+  intern(arms: IrType[], armLits?: (Record<string, string | number | boolean> | null)[]): string {
     const key = JSON.stringify(arms.map(typeKey));
     let id = this.byKey.get(key);
     if (id === undefined) {
       id = `u${this.unions.length}`;
       const def: IrUnionDef = { id, arms };
+      attachArmLits(def, armLits);
       this.byKey.set(key, id);
       this.byId.set(id, def);
       this.unions.push(def);
+    } else {
+      reconcileArmLits(this.byId.get(id)!, armLits);
     }
     return id;
   }
@@ -394,6 +401,49 @@ export class UnionRegistry {
   get(unionId: string): IrUnionDef | undefined {
     return this.byId.get(unionId);
   }
+}
+
+/** First interning of a def: attach the literal discriminants when any arm
+ * has one (an all-null list carries no constraint and stays off the def). */
+function attachArmLits(
+  def: IrUnionDef,
+  armLits: (Record<string, string | number | boolean> | null)[] | undefined,
+): void {
+  if (armLits !== undefined && armLits.some((l) => l !== null && Object.keys(l).length > 0)) {
+    def.armLits = armLits;
+  }
+}
+
+/** A LATER source union landed on an existing def: keep only the pairs BOTH
+ * sources guarantee (per arm, same name AND same value) — a source with no
+ * literals clears the arm's constraint. The dyn match may only be as strict
+ * as every producer of this def allows. */
+function reconcileArmLits(
+  def: IrUnionDef,
+  armLits: (Record<string, string | number | boolean> | null)[] | undefined,
+): void {
+  if (def.armLits === undefined) return;
+  let any = false;
+  for (let i = 0; i < def.armLits.length; i++) {
+    const prev = def.armLits[i];
+    if (prev === null || prev === undefined) continue;
+    const next = armLits?.[i] ?? null;
+    if (next === null) {
+      def.armLits[i] = null;
+      continue;
+    }
+    const kept: Record<string, string | number | boolean> = {};
+    let keptAny = false;
+    for (const [name, v] of Object.entries(prev)) {
+      if (next[name] === v) {
+        kept[name] = v;
+        keptAny = true;
+      }
+    }
+    def.armLits[i] = keptAny ? kept : null;
+    if (keptAny) any = true;
+  }
+  if (!any) delete def.armLits;
 }
 
 /** Human-readable rendering of an IrType for diagnostics (records expand to
@@ -2602,6 +2652,28 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     const sensitivityAtEntry = contextResolutions;
     try {
       const byKey = new Map<string, IrType>();
+      // Literal discriminants per arm (keyed like byKey): mapType widens a
+      // record field's literal type away (`kind: 'a'` → string), but the dyn
+      // match/check walkers need the VALUES to pick the right arm of a union
+      // of records — captured here from the CHECKER types, where the literals
+      // still exist, and carried on the interned def (IrUnionDef.armLits).
+      // Two parts landing on the same arm key reconcile down to the pairs
+      // both agree on (same rule as the registry's cross-union reconcile).
+      const litsByKey = new Map<string, Record<string, string | number | boolean> | null>();
+      const litsOfPart = (part: ts.Type): Record<string, string | number | boolean> | null => {
+        let out: Record<string, string | number | boolean> | null = null;
+        for (const prop of ctx.checker.getPropertiesOfType(part)) {
+          const pt = ctx.checker.getTypeOfSymbol(prop);
+          let v: string | number | boolean | undefined;
+          if (pt.isStringLiteralType()) v = pt.value;
+          else if (pt.isNumberLiteralType()) v = pt.value;
+          else if (pt.flags & ts.TypeFlags.BooleanLiteral) v = (pt as unknown as { intrinsicName: string }).intrinsicName === "true";
+          if (v === undefined) continue;
+          if (out === null) out = {};
+          out[prop.name] = v;
+        }
+        return out;
+      };
       for (const part of widened.getTypes()) {
         // A `void` PART is inhabited only by undefined (`Promise<void> |
         // void` return types, `string | void`): it becomes the undefinedT
@@ -2635,7 +2707,29 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
           }
           return null;
         }
-        byKey.set(typeKey(mapped), mapped);
+        const armKey = typeKey(mapped);
+        byKey.set(armKey, mapped);
+        if (mapped.kind === "record") {
+          const lits = litsOfPart(part);
+          if (!litsByKey.has(armKey)) {
+            litsByKey.set(armKey, lits);
+          } else {
+            const prev = litsByKey.get(armKey)!;
+            if (prev === null || lits === null) {
+              litsByKey.set(armKey, null);
+            } else {
+              const kept: Record<string, string | number | boolean> = {};
+              let keptAny = false;
+              for (const [name, v] of Object.entries(prev)) {
+                if (lits[name] === v) {
+                  kept[name] = v;
+                  keptAny = true;
+                }
+              }
+              litsByKey.set(armKey, keptAny ? kept : null);
+            }
+          }
+        }
       }
       const arms = [...byKey.values()];
       // A single surviving UNIT arm cannot stand alone (degenerate — the
@@ -2705,6 +2799,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         return null;
       }
       arms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
+      const armLits = arms.map((a) => {
+        const lits = litsByKey.get(typeKey(a));
+        return lits === undefined ? null : lits;
+      });
       if (unions.recursivePending(widened)) {
         // The knot closed through this union. A frame that resolved
         // through context-sensitive hooks (generic type parameters, mixin
@@ -2712,9 +2810,9 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
         // same ts.Type answers differently per instantiation — so
         // recursive generic-open unions stay fenced.
         if (contextResolutions !== sensitivityAtEntry) return null;
-        return { kind: "union", unionId: unions.finalizeRecursive(widened, arms) };
+        return { kind: "union", unionId: unions.finalizeRecursive(widened, arms, armLits) };
       }
-      return { kind: "union", unionId: unions.intern(arms) };
+      return { kind: "union", unionId: unions.intern(arms, armLits) };
     } finally {
       unions.inProgress.delete(widened);
     }

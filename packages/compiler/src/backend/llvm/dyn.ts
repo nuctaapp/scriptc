@@ -530,11 +530,14 @@ export class LlDyn {
       case "union": {
         const def = this.host.unionsById.get(t.unionId);
         if (!def) throw new Error(`llvm emitter bug: dynCheck of unknown union ${t.unionId}`);
-        // Arms in canonical order; any full match answers true.
+        // Arms in canonical order; any full match answers true. Record arms
+        // with literal discriminants (armLits) match through the literal-
+        // aware wrapper so structurally-overlapping siblings cannot steal
+        // each other's values.
         const yes = B.newLabel("dm.y");
-        for (const arm of def.arms) {
+        for (const [i, arm] of def.arms.entries()) {
           const ok = B.tmp();
-          B.line(`${ok} = call zeroext i1 @${this.dynMatchHelper(arm)}(ptr %d)`);
+          B.line(`${ok} = call zeroext i1 @${this.dynArmMatchHelper(arm, def.armLits?.[i])}(ptr %d)`);
           const ln = B.newLabel("dm.n");
           B.condBr(ok, yes, ln);
           B.startBlock(ln);
@@ -549,6 +552,109 @@ export class LlDyn {
     }
     this.defs.push(
       `define internal zeroext i1 @${name}(ptr %d) ${FN_ATTRS} { ; matches ${key}`,
+      B.render(),
+      `}`,
+      ``,
+    );
+    return name;
+  }
+
+  /* ── dynArmMatchHelper — union-arm match WITH literal discriminants ── */
+
+  private readonly dynArmMatchers = new Map<string, string>();
+
+  /** `sc_dmA_<n>(ptr d) -> i1` — does this dyn fit the union arm T AND carry
+   * the arm's literal discriminant values (IrUnionDef.armLits)? mapType
+   * widens record field literals away, so the structural matcher alone can
+   * pick the WRONG arm of a union of records (first structurally-compatible
+   * wins — layout corruption downstream); this wrapper tests the literal
+   * VALUES first and then defers to the ordinary structural matcher. Used by
+   * BOTH the union dynMatch and the union dynCheck so selection agrees. */
+  dynArmMatchHelper(arm: IrType, lits: Record<string, string | number | boolean> | null | undefined): string {
+    if (lits === null || lits === undefined) return this.dynMatchHelper(arm);
+    const names = Object.keys(lits).sort();
+    if (names.length === 0) return this.dynMatchHelper(arm);
+    const key = `${typeKey(arm)}|${JSON.stringify(names.map((n) => [n, lits[n]]))}`;
+    const existing = this.dynArmMatchers.get(key);
+    if (existing) return existing;
+    const name = `sc_dmA_${this.dynArmMatchers.size}`;
+    this.dynArmMatchers.set(key, name);
+    const B = new BlockBuilder();
+    // A typed-ref capsule holds an already-typed value: materialize to plain
+    // dyn data and re-run this same matcher (the generic matcher's pattern).
+    this.host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
+    this.host.declare(`declare void @scr_dyn_release_v(ptr)`);
+    const kd = this.kindOf(B, "%d");
+    const capsule = B.tmp();
+    B.line(`${capsule} = icmp eq i32 ${kd}, ${DK.TYPED_REF}`);
+    const lCapsule = B.newLabel("dma.tr");
+    const lPlain = B.newLabel("dma.pl");
+    B.condBr(capsule, lCapsule, lPlain);
+    B.startBlock(lCapsule);
+    const materialized = B.tmp();
+    const matchedCap = B.tmp();
+    B.line(`${materialized} = call ptr @scr_dyn_typed_ref_materialize(ptr %d)`);
+    B.line(`${matchedCap} = call zeroext i1 @${name}(ptr ${materialized})`);
+    B.line(`call void @scr_dyn_release_v(ptr ${materialized})`);
+    B.terminate(`ret i1 ${matchedCap}`);
+    B.startBlock(lPlain);
+    const fail = B.newLabel("dma.f");
+    const isObj = B.tmp();
+    B.line(`${isObj} = icmp eq i32 ${kd}, ${DK.OBJ}`);
+    const lObj = B.newLabel("dma.o");
+    B.condBr(isObj, lObj, fail);
+    B.startBlock(lObj);
+    for (const fieldName of names) {
+      const v = lits[fieldName]!;
+      const m = this.objGetLit(B, "%d", fieldName);
+      const has = B.tmp();
+      B.line(`${has} = icmp ne ptr ${m}, null`);
+      const lHas = B.newLabel("dma.k");
+      B.condBr(has, lHas, fail);
+      B.startBlock(lHas);
+      const mk = this.kindOf(B, m);
+      const lNext = B.newLabel("dma.n");
+      if (typeof v === "string") {
+        const isStr = B.tmp();
+        B.line(`${isStr} = icmp eq i32 ${mk}, ${DK.STR}`);
+        const lStr = B.newLabel("dma.s");
+        B.condBr(isStr, lStr, fail);
+        B.startBlock(lStr);
+        this.host.declare(`declare zeroext i1 @scr_str_eq(ptr, ptr)`);
+        const sv = this.payloadOf(B, m, "ptr");
+        const eq = B.tmp();
+        B.line(`${eq} = call zeroext i1 @scr_str_eq(ptr ${sv}, ptr ${this.host.internLiteral(v)}) ; ${fieldName} === ${JSON.stringify(v)}`);
+        B.condBr(eq, lNext, fail);
+      } else if (typeof v === "number") {
+        const isNum = B.tmp();
+        B.line(`${isNum} = icmp eq i32 ${mk}, ${DK.NUM}`);
+        const lNum = B.newLabel("dma.d");
+        B.condBr(isNum, lNum, fail);
+        B.startBlock(lNum);
+        const nv = this.payloadOf(B, m, "double");
+        const eq = B.tmp();
+        B.line(`${eq} = fcmp oeq double ${nv}, ${f64Lit(v)} ; ${fieldName} === ${v}`);
+        B.condBr(eq, lNext, fail);
+      } else {
+        const isBool = B.tmp();
+        B.line(`${isBool} = icmp eq i32 ${mk}, ${DK.BOOL}`);
+        const lBool = B.newLabel("dma.b");
+        B.condBr(isBool, lBool, fail);
+        B.startBlock(lBool);
+        const bv = this.boolOf(B, m);
+        if (v) B.condBr(bv, lNext, fail);
+        else B.condBr(bv, fail, lNext);
+      }
+      B.startBlock(lNext);
+    }
+    const generic = this.dynMatchHelper(arm);
+    const ok = B.tmp();
+    B.line(`${ok} = call zeroext i1 @${generic}(ptr %d)`);
+    B.terminate(`ret i1 ${ok}`);
+    B.startBlock(fail);
+    B.terminate(`ret i1 false`);
+    this.defs.push(
+      `define internal zeroext i1 @${name}(ptr %d) ${FN_ATTRS} { ; arm-matches ${key}`,
       B.render(),
       `}`,
       ``,
@@ -1022,9 +1128,10 @@ export class LlDyn {
         const def = host.unionsById.get(t.unionId);
         if (!def) throw new Error(`llvm emitter bug: dynCheck of unknown union ${t.unionId}`);
         // Arms in CANONICAL order, first FULL match wins. The matched
-        // arm's builder can no longer fail.
+        // arm's builder can no longer fail. Literal discriminants ride the
+        // same wrapper as dynMatch so match and check agree on the arm.
         def.arms.forEach((arm, i) => {
-          const m = this.dynMatchHelper(arm);
+          const m = this.dynArmMatchHelper(arm, def.armLits?.[i]);
           const hit = B.tmp();
           B.line(`${hit} = call zeroext i1 @${m}(ptr %d)`);
           const lHit = B.newLabel("dcu.h");
