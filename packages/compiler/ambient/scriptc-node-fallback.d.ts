@@ -978,6 +978,9 @@ declare module "node:fs" {
   export function unlinkSync(path: string): void;
   export function chmodSync(path: string, mode: number): void;
   export function chownSync(path: string, uid: number, gid: number): void;
+  /* Numeric-seconds form only (fractional seconds accepted); Date arguments
+   * are a program-side conversion. */
+  export function utimesSync(path: string, atime: number, mtime: number): void;
   /* The 2-argument form only (Node's mode flags have no lowering). The
    * destination is created or truncated carrying the SOURCE's mode. */
   export function copyFileSync(src: string, dest: string): void;
