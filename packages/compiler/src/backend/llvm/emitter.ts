@@ -165,6 +165,14 @@ import {
 
 export { LlvmUnsupportedError } from "./unsupported.js";
 
+/** Append src onto dst WITHOUT spreading: `dst.push(...src)` passes every
+ * element as a call argument, so any aggregate that scales with the whole
+ * program (shape defs, thunk defs, walker defs) overflows the call stack on
+ * large inputs. Every bulk append in this file goes through here. */
+function pushAll<T>(dst: T[], src: readonly T[]): void {
+  for (const item of src) dst.push(item);
+}
+
 /** An emitted value: an LLVM value string (SSA name or immediate) plus its
  * IR type — frames track these so releases stay type-directed, exactly the
  * CEmitter Temp shape. `slot` entries name a POINTER instead: the release
@@ -1393,7 +1401,7 @@ class LlEmitter {
           `}`,
           ``,
         );
-        defs.push(...dispatchBody);
+        pushAll(defs, dispatchBody);
 
         this.declare(`declare ptr @scr_ffi_call_new(ptr, ptr, ptr, ${this.sizeType})`);
         this.declare(`declare void @scr_ffi_post(ptr)`);
@@ -1791,7 +1799,7 @@ class LlEmitter {
       // finish_top_level initially notes 13. Replace that hint before exit
       // listeners run when a higher-priority verdict was already selected.
       lines.push(`  call void @scr_exit_code_note(i32 ${exitStatus})`);
-      lines.push(...exitListenerLines("xp"));
+      pushAll(lines, exitListenerLines("xp"));
       if (tracksIslandExit) {
         lines.push(
           `  %tla_exit_version_after = call ${this.sizeType} @scr_island_exit_code_version()`,
@@ -1807,7 +1815,7 @@ class LlEmitter {
           `  %tla_final_exit = phi i32 [ %tla_listener_exit, %tla_exit_updated ], [ ${exitStatus}, %tla_exit_unchanged ]`,
         );
       }
-      lines.push(...topPendingReleases);
+      pushAll(lines, topPendingReleases);
       lines.push(`  ret i32 ${tracksIslandExit ? "%tla_final_exit" : exitStatus}`);
       return lines;
     };
@@ -1906,8 +1914,8 @@ class LlEmitter {
       `%ScrIslandModule = type { ptr, ptr, ${this.sizeType}, ${this.sizeType}, i32, ptr, ${this.sizeType}, ${this.sizeType} }`,
       `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
     ];
-    out.push(...shapes.typeDefs);
-    out.push(...classShapes.typeDefs);
+    pushAll(out, shapes.typeDefs);
+    pushAll(out, classShapes.typeDefs);
     // Thread-instanced library state (abi.instance_per_thread): the
     // program TU's mutable globals — module globals, run-once guards, the
     // lazily-compiled regex literal caches — and the runtime globals its
@@ -2015,7 +2023,7 @@ class LlEmitter {
       }
       out.push(``);
     }
-    out.push(...ffiCallbacks.globals);
+    pushAll(out, ffiCallbacks.globals);
     if (ffiCallbacks.globals.length > 0) out.push(``);
     for (const g of globals) {
       const ty = this.llType(g.type);
@@ -2023,16 +2031,16 @@ class LlEmitter {
       out.push(`@${mangleGlobal(g.id)} = internal ${tl}global ${ty} ${zero} ; ${g.name}`);
     }
     if (globals.length > 0) out.push(``);
-    out.push(...helpers);
-    out.push(...ffiCallbacks.defs);
-    out.push(...shapes.defs);
-    out.push(...classShapes.defs);
-    out.push(...classObjDefs);
-    out.push(...this.walkers.defs);
-    out.push(...this.dyn.defs);
-    out.push(...wrappers);
-    out.push(...asyncDefs);
-    out.push(...this.resolveThunkDefs);
+    pushAll(out, helpers);
+    pushAll(out, ffiCallbacks.defs);
+    pushAll(out, shapes.defs);
+    pushAll(out, classShapes.defs);
+    pushAll(out, classObjDefs);
+    pushAll(out, this.walkers.defs);
+    pushAll(out, this.dyn.defs);
+    pushAll(out, wrappers);
+    pushAll(out, asyncDefs);
+    pushAll(out, this.resolveThunkDefs);
     out.push(fnDefs.join("\n\n"), ``);
 
     // main(): scr_init, the program-dependent error-vt interval stamps,
@@ -2088,7 +2096,7 @@ class LlEmitter {
     if (this.mod.lib !== undefined) {
       // LIBRARY mode: no @main — the profile-declared external
       // symbols instead, from the same IR facts the C emission consumes.
-      out.push(...this.emitLibDefs(globals, globalReleaseLines, stamps));
+      pushAll(out, this.emitLibDefs(globals, globalReleaseLines, stamps));
       out.push(`attributes #0 = { sanitize_address }`);
       if (this.wasi) out.push(`attributes #1 = { sanitize_address presplitcoroutine }`);
       if (hasNoInlineRecordClone) out.push(`attributes #2 = { noinline sanitize_address }`);
@@ -2347,7 +2355,7 @@ class LlEmitter {
       // from the poisoned guard and every runtime touch (ratified), so a
       // host can read them before init and after a trap. The u64 rides
       // i64 two's-complement (LLVM integer constants are signed).
-      out.push(...emitLibraryIdentityLines("llvm", lib.identity, FN_ATTRS));
+      pushAll(out, emitLibraryIdentityLines("llvm", lib.identity, FN_ATTRS));
     }
     if (lib.resultResetSymbol !== null) {
       out.push(
@@ -2711,7 +2719,7 @@ class LlEmitter {
         }
         tr.push(`  ret void`, `}`, ``);
       }
-      out.push(...tr);
+      pushAll(out, tr);
 
       // Spawn wrapper: pack the args (+1 moves in), spawn the fiber.
       const params = fieldTys.map((ty, i) => `${ty} %a${i}`);
@@ -2798,9 +2806,9 @@ class LlEmitter {
         `}`,
         ``,
       );
-      out.push(...sp);
+      pushAll(out, sp);
     }
-    out.push(...this.emitGenScaffolding());
+    pushAll(out, this.emitGenScaffolding());
     return out;
   }
 
@@ -2898,7 +2906,7 @@ class LlEmitter {
       }
       tr.push(`  br label %done`, `done:`, `  ret void`, `}`, ``);
       }
-      out.push(...tr);
+      pushAll(out, tr);
 
       // The never-started teardown: drop the packed (+1) arguments.
       const dr: string[] = [
@@ -2921,7 +2929,7 @@ class LlEmitter {
         }
       });
       dr.push(`  call void @free(ptr %ap)`, `  ret void`, `}`, ``);
-      out.push(...dr);
+      pushAll(out, dr);
 
       // Spawn wrapper: pack the args (+1 moves in), allocate the
       // SUSPENDED fiber — nothing runs until the first .next().
@@ -2954,7 +2962,7 @@ class LlEmitter {
         `}`,
         ``,
       );
-      out.push(...sp);
+      pushAll(out, sp);
     }
     return out;
   }
@@ -8395,7 +8403,7 @@ class LlEmitter {
         break;
     }
     d.push(`}`, ``);
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -8667,7 +8675,7 @@ class LlEmitter {
       );
     }
     d.push(`}`, ``);
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -8744,7 +8752,7 @@ class LlEmitter {
         );
       }
       d.push(`  ${fulfill("%u")}`, `  ret void`, `}`, ``);
-      this.resolveThunkDefs.push(...d);
+      pushAll(this.resolveThunkDefs, d);
       return sym;
     }
     // Sub-union re-tag: switch over the entry's arms, rebuild under the
@@ -8808,7 +8816,7 @@ class LlEmitter {
       `}`,
       ``,
     );
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -8993,14 +9001,14 @@ class LlEmitter {
       return lines;
     };
     d.push(`susp:`);
-    d.push(...wrapFrom(genT.yieldT, "y"));
+    pushAll(d, wrapFrom(genT.yieldT, "y"));
     d.push(
       `doneb:`,
       `  %has = call zeroext i1 @scr_gen_out_has(ptr %g)`,
       `  br i1 %has, label %retv, label %undefv`,
       `retv:`,
     );
-    d.push(...wrapFrom(genT.retT, "c"));
+    pushAll(d, wrapFrom(genT.retT, "c"));
     d.push(
       `undefv:`,
       `  store ptr ${undefRef}, ptr %vslot`,
@@ -9013,7 +9021,7 @@ class LlEmitter {
       `}`,
       ``,
     );
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -9220,7 +9228,7 @@ class LlEmitter {
       }
     }
     d.push(`  call void @scr_closure_release(ptr %orig)`, `  ret void`, `}`, ``);
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return { fn: sym, shim };
   }
 
@@ -9370,7 +9378,7 @@ class LlEmitter {
       d.push(`  call void @scr_net_server_release_v(ptr %srv)`, `  ret void`);
     }
     d.push(`}`, ``);
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -9499,7 +9507,7 @@ class LlEmitter {
       finish("%dv");
       d.push(`}`, ``);
     }
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -9603,7 +9611,7 @@ class LlEmitter {
     if (errT !== undefined) d.push(`  call void @scr_union_release(ptr %e)`);
     if (dataT !== undefined) d.push(`  call void @scr_union_release(ptr %d)`);
     d.push(`  ret void`, `}`, ``);
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -9670,7 +9678,7 @@ class LlEmitter {
       `}`,
       ``,
     );
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -9882,7 +9890,7 @@ class LlEmitter {
       }
     }
     d.push(`  ret void`, `}`, ``);
-    this.resolveThunkDefs.push(...d);
+    pushAll(this.resolveThunkDefs, d);
     return sym;
   }
 
@@ -11797,7 +11805,7 @@ class LlEmitter {
       `}`,
       ``,
     );
-    this.resolveThunkDefs.push(...lines);
+    pushAll(this.resolveThunkDefs, lines);
     return `@${commit}`;
   }
 
